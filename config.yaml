@@ -1,0 +1,92 @@
+project_name: ELECTRA_NEW
+eq_check: False
+wandb: False
+
+# New stuff
+inference_cutoff: 3.5
+use_links: True
+use_rel_pos: True
+weigh_com_by_mass: False
+activation_type: silu
+use_sh: False
+plot_gaus_pos: True
+remove_vector_components: True
+
+model_type: hotpp
+miaonet: miaomiao
+max_out_heads: [3,3,3] # scal, vec, tens
+head_activate_list: ['silu', 'silu', 'silu']
+#hotpp params
+use_vmf: False
+gaus_per_electrons: 10
+norm_heads: ['none', 'none', 'none']
+norm_blocks: 'none'
+conv_mode: node_j
+update_edge: False
+#norm_heads: ['graph', 'graph', 'graph']
+use_final_fctp: True
+r_max: 3
+n_max: 3
+out_max: 3
+hotpp_cutoff: 6.0
+hotpp_nlayers: 6
+hotpp_outdim: 120
+use_graph_directly: True
+master_units: 120
+embed_type: aufbau
+
+
+# MODEL PARAMS
+negative_contributions: True
+loss_type: "huber"
+loss_coef: 100
+huber_loss_threshold: 0.1
+reduce_weight_by: 4
+relu: False
+
+seed: 505
+n_train_points: 10000
+n_split_points: 50000
+train_sample_all: True
+train_set_perc: 0.9
+n_files: 10
+data_split: "test"
+max_grid_points: 400000
+
+niflheim: False
+
+# FOLDERS
+qm9_dens_path: /Users/jels/Desktop/ELECTRA/QM9_Densities/Full
+
+data_split_path: /Users/jels/Desktop/ELECTRA/data_splits/
+
+
+pred_dens_path_val: /Users/jels/Desktop/ELECTRA/pred_dens/validation/
+density_delta_path_val: /Users/jels/Desktop/ELECTRA/density_deltas/validation
+pred_dens_path_test: /Users/jels/Desktop/ELECTRA/pred_dens/test/
+density_delta_path_test: /Users/jels/Desktop/ELECTRA/density_deltas/test
+gaus_pos_path_val: /Users/jels/Desktop/ELECTRA/gaussian_positions/validation/
+gaus_pos_path_test: /Users/jels/Desktop/ELECTRA/gaussian_positions/test/
+
+model_dir: /Users/jels/Desktop/ELECTRA/trained_models
+
+load_model: False
+load_model_path: Null
+
+# TRAINING
+optimizer: adamw
+n_epochs: 1000
+initial_lr: 0.001
+final_lr: 0.0003
+n_warmups: 0
+clip_grad: False
+gradient_clip_value: 1.0
+weight_decay: 0.0000
+real_batch_size: 1
+num_batches_before_update: 1
+lr_dec_every: 15
+lr_gamma: 0.9
+eval_every: 1
+construct_test_cd: False
+construct_val_cd: False
+save_model: False
