@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 def run():
     if torch.cuda.is_available():
-        stream = open("/home/energy/jels/electra_v2/niflheim_config.yaml")
+        stream = open("/home/energy/jels/ELECTRA_CLEAN/niflheim_config.yaml")
         torch.set_float32_matmul_precision('highest')
     else:
         stream = open("config.yaml")
