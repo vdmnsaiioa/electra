@@ -19,7 +19,7 @@ head_activate_list: ['silu', 'silu', 'silu']
 #hotpp params
 use_vmf: False
 gaus_per_electrons: 50
-norm_heads: ['none', 'none', 'none']
+norm_heads: ['none', 'none', 'none'
 norm_blocks: 'none'
 conv_mode: node_j
 update_edge: False
@@ -39,9 +39,9 @@ embed_type: aufbau
 negative_contributions: True
 loss_type: "huber"
 loss_coef: 100
-huber_loss_threshold: 0.03
-reduce_weight_by: 0.9
-relu: True
+huber_loss_threshold: 0.1
+reduce_weight_by: 4
+relu: False
 
 weight_decay: 0.000
 data_split: "15000"
@@ -61,9 +61,9 @@ niflheim: True
 # FOLDERS
 qm9_dens_path: /home/scratch3/jels/QM9_Full
 
-data_split_path: /home/energy/jels/ELECTRA_UM/data_splits/
+data_split_path: /home/energy/jels/ELECTRA_CLEAN/data_splits/
 
-niflheim_base_path: /home/scratch3/jels/ELECTRA_UM/
+niflheim_base_path: /home/scratch3/jels/ELECTRA_CLEAN/
 pred_dens_path_val: pred_dens/validation/
 density_delta_path_val: density_deltas/validation
 pred_dens_path_test: pred_dens/test/
@@ -71,7 +71,7 @@ density_delta_path_test: density_deltas/test
 gaus_pos_path_val: gaussian_positions/validation/
 gaus_pos_path_test: gaussian_positions/test/
 
-model_dir: /home/scratch3/jels/ELECTRA_UM/trained_models
+model_dir: /home/scratch3/jels/ELECTRA_CLEAN/trained_models
 
 load_model: False
 load_model_path: Null
@@ -80,9 +80,9 @@ load_model_path: Null
 # TRAINING
 optimizer: adamw
 n_epochs: 1000
-lr: 0.00001
+initial_lr: 0.00001
 final_lr: 0.001
-n_warmups: 150
+n_warmups: 0
 clip_grad: False
 gradient_clip_value: 1.0
 real_batch_size: 1

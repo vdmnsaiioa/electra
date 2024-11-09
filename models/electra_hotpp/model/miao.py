@@ -178,11 +178,17 @@ class MiaoNet(AtomicModule):
             hidden_nodes, norm_factor, conv_mode, update_edge, n_layers)
         self.block_heads = self.get_block_heads(head_activate_list, max_r_way, max_in_way[1:], max_out_way, max_out_heads,
             hidden_nodes, norm_factor, conv_mode, update_edge, n_layers)
-        self.mean_vec_mlps = nn.ModuleList([nn.Sequential(
-            nn.Linear(2*hidden_nodes[0], hidden_nodes[0]),
+        self.mean_vec_mlps_blocks = nn.ModuleList([nn.Sequential(
+            nn.Linear(3*hidden_nodes[0], 2*hidden_nodes[0]),
             nn.ReLU(),
-            nn.Linear(hidden_nodes[0], hidden_nodes[0]),
-            nn.Sigmoid()
+            nn.Linear(2*hidden_nodes[0], hidden_nodes[0]),
+            nn.Tanh(),
+        ) for _ in range(3)])
+        self.mean_vec_mlps_heads = nn.ModuleList([nn.Sequential(
+            nn.Linear(5 * hidden_nodes[0], 4 * hidden_nodes[0]),
+            nn.ReLU(),
+            nn.Linear(4 * hidden_nodes[0], 2 * hidden_nodes[0]),
+            nn.Tanh(),
         ) for _ in range(3)])
 
     def calculate(self,
@@ -195,17 +201,18 @@ class MiaoNet(AtomicModule):
         n_units = init_embed.shape[1]
         COM = torch.sum(batch_data['coordinate'] * batch_data['atomic_number'][:, None], axis=0) / torch.sum(batch_data['atomic_number'])
         rel_pos = batch_data['coordinate'] - COM
-        rel_pos = rel_pos.unsqueeze(1).repeat(1, init_embed.shape[1], 1)
+        rel_pos = rel_pos.unsqueeze(1).repeat(1, n_units, 1)
         for i, en_equivalent in enumerate(self.en_equivalent_blocks):
             node_info, edge_info = en_equivalent(node_info, edge_info, batch_data)
-            mean_vec = node_info[1].mean(dim=0)
-            #node_info[1] = node_info[1] - mean_vec
-            mean_vec_exp = mean_vec.expand(n_atoms, -1, -1)
+            #mean_vec = node_info[1].mean(dim=0)
+            #mean_vec_exp = mean_vec.expand(n_atoms, -1, -1)
+            mean_vec = node_info[1].mean(dim=1)
+            mean_vec_exp = mean_vec.unsqueeze(1).repeat(1, n_units, 1)
             norm_mean = mean_vec_exp/torch.linalg.norm(mean_vec_exp, dim=-1, keepdim=True)
             norm_node_vectors = node_info[1]/torch.linalg.norm(node_info[1], dim=-1, keepdim=True)
             dot_products = torch.sum(norm_mean * norm_node_vectors, dim=-1)
-            mean_vec_weights = (1 - torch.abs(dot_products) + 0.05)
-            node_info[1] = norm_mean * mean_vec_weights.unsqueeze(-1)
+            mean_vec_weights = self.mean_vec_mlps_blocks[i](torch.cat([init_embed, node_info[0], dot_products], dim=-1))
+            node_info[1] = norm_node_vectors * mean_vec_weights.unsqueeze(-1)
             #plot_gaussian_arrows(batch_data['coordinate'], node_info[1],f"AA_temp_pos_plots/gaus_ar_block_{i}_{mol_ID}.html")
         ni_1, ei_1 = ({i: node_info[i] for i in node_info.keys()},
                         {i: edge_info[i] for i in edge_info.keys()})
@@ -216,40 +223,52 @@ class MiaoNet(AtomicModule):
         ni_3, ei_3 = ({i: node_info[i] for i in node_info.keys()},
                         {i: edge_info[i] for i in edge_info.keys()})
 
+        ## 1ST HEAD
         node_info_1, edge_info_1 = self.block_heads[0](ni_1, ei_1, batch_data)
-        #mean_vec_1 = node_info_1[1].mean(dim=0).expand(n_atoms, -1, -1)
-        mean_vec_1 = node_info_1[1].mean(dim=1).unsqueeze(1).repeat(1, init_embed.shape[1], 1)
-        mean_vec_1 = mean_vec_1 / torch.linalg.norm(mean_vec_1, dim=-1, keepdim=True)
-        mean_scal_1 = node_info_1[0].mean(dim=0).expand(n_atoms, -1)
-        mean_weights_1 = self.mean_vec_mlps[0](torch.cat([mean_scal_1, node_info_1[0]], dim=-1))
+        mean_vec_atom_1 = node_info_1[1].mean(dim=1).unsqueeze(1).repeat(1, n_units, 1)
+        mean_vec_atom_1 = mean_vec_atom_1 / torch.linalg.norm(mean_vec_atom_1, dim=-1, keepdim=True)
+        #mean_vec_system_1 =  node_info_1[1].mean(dim=0).repeat(n_atoms, 1, 1)
+        #mean_vec_system_1 = mean_vec_system_1 / torch.linalg.norm(mean_vec_system_1, dim=-1, keepdim=True)
         norm_node_vec_1 = node_info_1[1]/ torch.linalg.norm(node_info_1[1], dim=-1, keepdim=True)
-        dot_products_1 = torch.sum(mean_vec_1 * norm_node_vec_1, dim=-1)
-        mean_vec_weights_1 = (1 - torch.abs(dot_products_1) + 0.05)
-        node_info_1[1] = norm_node_vec_1 - mean_vec_1 * mean_weights_1.unsqueeze(-1) * torch.sign(torch.sum(rel_pos*mean_vec_1, dim=-1, keepdim=True)) * mean_vec_weights_1.unsqueeze(-1)
-        #plot_gaussian_arrows(batch_data['coordinate'], node_info_scalar[1], f"AA_temp_pos_plots/scalar_head_{mol_ID}.html")
+        dot_products_atom_1 = torch.sum(mean_vec_atom_1 * norm_node_vec_1, dim=-1)
+        #dot_products_system_1 = torch.sum(mean_vec_system_1 * norm_node_vec_1, dim=-1)
+        dot_products_rel_pos_atom_1 = torch.sum(rel_pos * mean_vec_atom_1, dim=-1)
+        #dot_products_rel_pos_system_1 = torch.sum(rel_pos * mean_vec_system_1, dim=-1)
+        dot_products_node_vecs_1 = torch.sum(rel_pos * norm_node_vec_1, dim=-1)
+        mean_weights_1 = self.mean_vec_mlps_heads[0](torch.cat([init_embed, node_info_1[0], dot_products_node_vecs_1, dot_products_atom_1,  dot_products_rel_pos_atom_1], dim=-1))
+        node_info_1[1] = mean_weights_1[:, 0:n_units].unsqueeze(-1) * norm_node_vec_1 + mean_vec_atom_1 * mean_weights_1[:, n_units:n_units*2].unsqueeze(-1)
+        #node_info_1[1] = norm_node_vec_1 - mean_vec_1 * mean_weights_1.unsqueeze(-1) * torch.sign(torch.sum(rel_pos*mean_vec_1, dim=-1, keepdim=True)) * mean_vec_weights_1.unsqueeze(-1)
 
+        ## 2ND HEAD
         node_info_2, edge_info_2 = self.block_heads[1](ni_2, ei_2, batch_data)
-        #mean_vec_2 = node_info_2[1].mean(dim=0).expand(n_atoms, -1, -1)
-        mean_vec_2 = node_info_2[1].mean(dim=1).unsqueeze(1).repeat(1, init_embed.shape[1], 1)
-        mean_vec_2 = mean_vec_2 / torch.linalg.norm(mean_vec_2, dim=-1, keepdim=True)
-        mean_scal_2 = node_info_2[0].mean(dim=0).expand(n_atoms, -1)
-        mean_weights_2 = self.mean_vec_mlps[1](torch.cat([mean_scal_2, node_info_2[0]], dim=-1))
-        norm_node_vec_2 = node_info_2[1]/ torch.linalg.norm(node_info_2[1], dim=-1, keepdim=True)
-        dot_products_2 = torch.sum(mean_vec_2 * norm_node_vec_2, dim=-1)
-        mean_vec_weights_2 = (1 - torch.abs(dot_products_2) + 0.05)
-        node_info_2[1] = norm_node_vec_2 - mean_vec_2 * mean_weights_2.unsqueeze(-1) * torch.sign(torch.sum(rel_pos*mean_vec_2, dim=-1, keepdim=True)) * mean_vec_weights_2.unsqueeze(-1)
-        #plot_gaussian_arrows(batch_data['coordinate'], node_info_vector[1], f"AA_temp_pos_plots/vector_head_{mol_ID}.html")
+        mean_vec_atom_2 = node_info_2[1].mean(dim=1).unsqueeze(1).repeat(1, init_embed.shape[1], 1)
+        mean_vec_atom_2 = mean_vec_atom_2 / torch.linalg.norm(mean_vec_atom_2, dim=-1, keepdim=True)
+        #mean_vec_system_2 = node_info_2[1].mean(dim=0).repeat(n_atoms, 1, 1)
+        #mean_vec_system_2 = mean_vec_system_2 / torch.linalg.norm(mean_vec_system_2, dim=-1, keepdim=True)
+        norm_node_vec_2 = node_info_2[1] / torch.linalg.norm(node_info_2[1], dim=-1, keepdim=True)
+        dot_products_atom_2 = torch.sum(mean_vec_atom_2 * norm_node_vec_2, dim=-1)
+        #dot_products_system_2 = torch.sum(mean_vec_system_2 * norm_node_vec_2, dim=-1)
+        dot_products_rel_pos_atom_2 = torch.sum(rel_pos * mean_vec_atom_2, dim=-1)
+        #dot_products_rel_pos_system_2 = torch.sum(rel_pos * mean_vec_system_2, dim=-1)
+        dot_products_node_vecs_2 = torch.sum(rel_pos * norm_node_vec_2, dim=-1)
+        mean_weights_2 = self.mean_vec_mlps_heads[1](torch.cat([init_embed, node_info_2[0], dot_products_node_vecs_2, dot_products_atom_2, dot_products_rel_pos_atom_2], dim=-1))
+        node_info_2[1] = mean_weights_2[:, 0:n_units].unsqueeze(-1) * norm_node_vec_2 + mean_vec_atom_2 * mean_weights_2[:, n_units:n_units*2].unsqueeze(-1)
+        # node_info_2[1] = norm_node_vec_2 - mean_vec_2 * mean_weights_2.unsqueeze(-1) * torch.sign(torch.sum(rel_pos*mean_vec_2, dim=-1, keepdim=True)) * mean_vec_weights_2.unsqueeze(-1)
 
+        # 3RD HEAD
         node_info_3, edge_info_3 = self.block_heads[2](ni_3, ei_3, batch_data)
-        #mean_vec_3 = node_info_3[1].mean(dim=0).expand(n_atoms, -1, -1)
-        mean_vec_3 = node_info_3[1].mean(dim=1).unsqueeze(1).repeat(1, init_embed.shape[1], 1)
-        mean_vec_3 = mean_vec_3 / torch.linalg.norm(mean_vec_3, dim=-1, keepdim=True)
-        mean_scal_3 = node_info_3[0].mean(dim=0).expand(n_atoms, -1)
-        mean_weights_3 = self.mean_vec_mlps[2](torch.cat([mean_scal_3, node_info_3[0]], dim=-1))
+        mean_vec_atom_3 = node_info_3[1].mean(dim=1).unsqueeze(1).repeat(1, init_embed.shape[1], 1)
+        mean_vec_atom_3 = mean_vec_atom_3 / torch.linalg.norm(mean_vec_atom_3, dim=-1, keepdim=True)
+        #mean_vec_system_3 = node_info_3[1].mean(dim=0).repeat(n_atoms, 1, 1)
+        #mean_vec_system_3 = mean_vec_system_3 / torch.linalg.norm(mean_vec_system_3, dim=-1, keepdim=True)
         norm_node_vec_3 = node_info_3[1] / torch.linalg.norm(node_info_3[1], dim=-1, keepdim=True)
-        dot_products_3 = torch.sum(mean_vec_3 * norm_node_vec_3, dim=-1)
-        mean_vec_weights_3 = (1 - torch.abs(dot_products_3) + 0.05)
-        node_info_3[1] = norm_node_vec_3 - mean_vec_3 * mean_weights_3.unsqueeze(-1) * torch.sign(torch.sum(rel_pos*mean_vec_3, dim=-1, keepdim=True)) * mean_vec_weights_3.unsqueeze(-1)
+        dot_products_atom_3 = torch.sum(mean_vec_atom_3 * norm_node_vec_3, dim=-1)
+        #dot_products_system_3 = torch.sum(mean_vec_system_3 * norm_node_vec_3, dim=-1)
+        dot_products_rel_pos_atom_3 = torch.sum(rel_pos * mean_vec_atom_3, dim=-1)
+        #dot_products_rel_pos_system_3 = torch.sum(rel_pos * mean_vec_system_3, dim=-1)
+        dot_products_node_vecs_3 = torch.sum(rel_pos * norm_node_vec_3, dim=-1)
+        mean_weights_3 = self.mean_vec_mlps_heads[2](torch.cat([init_embed, node_info_3[0], dot_products_node_vecs_3, dot_products_atom_3, dot_products_rel_pos_atom_3], dim=-1))
+        node_info_3[1] = mean_weights_3[:, 0:n_units].unsqueeze(-1) * norm_node_vec_3 + mean_vec_atom_3 * mean_weights_3[:, n_units:n_units*2].unsqueeze(-1)
         #plot_gaussian_arrows(batch_data['coordinate'], node_info_tensor[1], f"AA_temp_pos_plots/tensor_head_{mol_ID}.html")
 
         return node_info_1, node_info_2, node_info_3, init_embed
@@ -260,13 +279,13 @@ class MiaoNet(AtomicModule):
         emb = self.embedding_layer(batch_data=batch_data)
 
         sb_axes = self.get_axes_of_inertia(batch_data)
-        n_ax_oi = sb_axes.shape[0]
+        n_ax_oi = sb_axes.shape[1]
 
         n_atoms, emb_dim = emb.shape
 
         emb_l1 = torch.zeros(n_atoms, emb_dim, 3, device=emb.device)
-        sb_axes_extended = sb_axes.unsqueeze(0).expand(n_atoms, -1, -1)
-        emb_l1[:, :n_ax_oi, :] = sb_axes_extended
+        #sb_axes_extended = sb_axes.unsqueeze(0).expand(n_atoms, -1, -1)
+        emb_l1[:, :n_ax_oi, :] = sb_axes
 
         node_info = {0: emb, 1: emb_l1}
         #node_info = {0: emb}
@@ -312,6 +331,7 @@ class MiaoNet(AtomicModule):
         COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
         centroid = torch.mean(positions, axis=0)
         mass_disp_vector = COM - centroid
+        n_atoms = positions.shape[0]
 
         # Center the positions
         centered_positions = positions - COM
@@ -326,23 +346,21 @@ class MiaoNet(AtomicModule):
         ax_1 = axes_of_inertia[:, 0]  # First principal axis
         ax_2 = axes_of_inertia[:, 1] # Second principal axis
         ax_3 = axes_of_inertia[:, 2] # Third principal axis
-        ax_1_weighted = axes_of_inertia[:, 0] * torch.sqrt(eigenvalues[0])  # First principal axis
-        ax_2_weighted = axes_of_inertia[:, 1] * torch.sqrt(eigenvalues[1]) # Second principal axis
-        ax_3_weighted = axes_of_inertia[:, 2] * torch.sqrt(eigenvalues[2]) # Third principal axis
-
-        dot_products = torch.tensor([
-            torch.dot(ax_1, vector_to_dot),
-            torch.dot(-ax_1, vector_to_dot),
-            torch.dot(ax_2, vector_to_dot),
-            torch.dot(-ax_2, vector_to_dot),
-            torch.dot(ax_3, vector_to_dot),
-            torch.dot(-ax_3, vector_to_dot),
-        ])
-
-        sorted_indices = torch.argsort(dot_products, descending=True)
-        sorted_axes_aoi = torch.stack([ax_1, -ax_1, ax_2, -ax_2, ax_3, -ax_3])[sorted_indices]
-        n_vecs = 6
-        return sorted_axes_aoi[:n_vecs]
+        aoi_all_atoms = torch.zeros((n_atoms, 6, 3), device=positions.device)
+        for i in range(n_atoms):
+            #vector_to_dot = centered_positions[i] # Just hash this to still use COM
+            dot_products = torch.tensor([
+                torch.dot(ax_1, vector_to_dot),
+                torch.dot(-ax_1, vector_to_dot),
+                torch.dot(ax_2, vector_to_dot),
+                torch.dot(-ax_2, vector_to_dot),
+                torch.dot(ax_3, vector_to_dot),
+                torch.dot(-ax_3, vector_to_dot),
+            ])
+            sorted_indices = torch.argsort(dot_products, descending=True)
+            sorted_axes_aoi = torch.stack([ax_1, -ax_1, ax_2, -ax_2, ax_3, -ax_3])[sorted_indices]
+            aoi_all_atoms[i] = sorted_axes_aoi
+        return aoi_all_atoms
 
 
 

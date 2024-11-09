@@ -1,6 +1,6 @@
-project_name: ELECTRA_NEW
+project_name: ELECTRA_UM
 eq_check: False
-wandb: False
+wandb: True
 
 # New stuff
 inference_cutoff: 3.5
@@ -56,19 +56,19 @@ max_grid_points: 400000
 niflheim: False
 
 # FOLDERS
-qm9_dens_path: /Users/jels/Desktop/ELECTRA/QM9_Densities/Full
+qm9_dens_path: /Users/jels/Desktop/ELECTRA_CLEAN/QM9_Densities/Full
 
-data_split_path: /Users/jels/Desktop/ELECTRA/data_splits/
+data_split_path: /Users/jels/Desktop/ELECTRA_CLEAN/data_splits/
 
 
-pred_dens_path_val: /Users/jels/Desktop/ELECTRA/pred_dens/validation/
-density_delta_path_val: /Users/jels/Desktop/ELECTRA/density_deltas/validation
-pred_dens_path_test: /Users/jels/Desktop/ELECTRA/pred_dens/test/
-density_delta_path_test: /Users/jels/Desktop/ELECTRA/density_deltas/test
-gaus_pos_path_val: /Users/jels/Desktop/ELECTRA/gaussian_positions/validation/
-gaus_pos_path_test: /Users/jels/Desktop/ELECTRA/gaussian_positions/test/
+pred_dens_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/pred_dens/validation/
+density_delta_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/density_deltas/validation
+pred_dens_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/pred_dens/test/
+density_delta_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/density_deltas/test
+gaus_pos_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/gaussian_positions/validation/
+gaus_pos_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/gaussian_positions/test/
 
-model_dir: /Users/jels/Desktop/ELECTRA/trained_models
+model_dir: /Users/jels/Desktop/ELECTRA_CLEAN/trained_models
 
 load_model: False
 load_model_path: Null
@@ -76,7 +76,7 @@ load_model_path: Null
 # TRAINING
 optimizer: adamw
 n_epochs: 1000
-initial_lr: 0.001
+initial_lr: 0.0003
 final_lr: 0.0003
 n_warmups: 0
 clip_grad: False
