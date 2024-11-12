@@ -19,7 +19,7 @@ head_activate_list: ['silu', 'silu', 'silu']
 #hotpp params
 use_vmf: False
 gaus_per_electrons: 50
-norm_heads: ['none', 'none', 'none'
+norm_heads: ['none', 'none', 'none']
 norm_blocks: 'none'
 conv_mode: node_j
 update_edge: False

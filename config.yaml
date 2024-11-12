@@ -10,7 +10,7 @@ weigh_com_by_mass: False
 activation_type: silu
 use_sh: False
 plot_gaus_pos: True
-remove_vector_components: True
+remove_vector_components: False
 
 model_type: hotpp
 miaonet: miaomiao
@@ -24,7 +24,6 @@ norm_blocks: 'none'
 conv_mode: node_j
 update_edge: False
 #norm_heads: ['graph', 'graph', 'graph']
-use_final_fctp: True
 r_max: 3
 n_max: 3
 out_max: 3
@@ -76,7 +75,7 @@ load_model_path: Null
 # TRAINING
 optimizer: adamw
 n_epochs: 1000
-initial_lr: 0.0003
+initial_lr: 0.001
 final_lr: 0.0003
 n_warmups: 0
 clip_grad: False

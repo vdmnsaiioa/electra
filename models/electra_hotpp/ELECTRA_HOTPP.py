@@ -77,7 +77,6 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         self.activation_type = config['activation_type']
         self.gaus_per_electrons = config['gaus_per_electrons']
         self.units = self.gaus_per_electrons
-        self.use_final_fctp = config['use_final_fctp']
         self.master_units = config['master_units']
         self.num_layers = config['hotpp_nlayers']
         self.hotpp_outdim = config['hotpp_outdim']
@@ -146,16 +145,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             nn.Linear(self.units * 2, self.units * 2),
         )
 
-        self.cross_mlp = nn.Sequential(
-            nn.Linear(2 * self.units, self.units * 2),
-            nn.ReLU(),
-            nn.Linear(self.units * 2, 3*self.units),
-        )
 
         self.tens_irrep = CartesianTensor("ij")
         self.sym_tens_irrep = CartesianTensor("ij=ji")
         self.vec_irrep = CartesianTensor("i")
         self.precision = torch.float32
+
 
     def forward(self,
                 atoms,
@@ -237,38 +232,32 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         pos_disp = X_vec.view(-1, 3)
         pos_disp_2 = X_scal_vec.view(-1, 3)
 
-        pos_disp = self.normalize_vector(pos_disp.reshape(-1, 3))
-        pos_disp_2 = self.normalize_vector(pos_disp_2.reshape(-1, 3))
-        VMF_Vec = self.normalize_vector(VMF_Vec.reshape(-1, 3))
-        #cross_weights = self.cross_mlp(torch.cat([X_scal, X_vec_scal], dim=-1))
+        #pos_disp = self.normalize_vector(pos_disp)
+        #pos_disp_2 = self.normalize_vector(pos_disp_2)
+        #VMF_Vec = self.normalize_vector(VMF_Vec)
 
-        #cross_vecs = (cross_weights[:, :self.units].reshape(n_atoms*self.units, 1) * self.normalize_vector(X_vec) /
-                      #+ cross_weights[:, self.units:self.units*2].reshape(n_atoms*self.units, 1) * self.normalize_vector(X_scal_vec) /
-                      #+ cross_weights[:, 2*self.units:3*self.units].reshape(n_atoms*self.units, 1) * torch.cross(self.normalize_vector(X_vec), self.normalize_vector(X_scal_vec)))
-
-        #cross_vecs = cross_vecs.view(-1, 3)
-        wsm = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal_2, X_tens_scal_2), dim=-1).view(n_atoms, -1)
-        wsm = self.scal_mult_mlp_direct(wsm)
+        wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal_2, X_tens_scal_2), dim=-1).view(n_atoms, -1)
+        wsm = self.scal_mult_mlp_direct(wsm_)
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
         pos_factors = wsm[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
         pos_factors_2 = wsm[:, self.units * 3:self.units * 4].reshape(n_atoms * self.units, 1)
         scaling_factors_1 =  wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
         scaling_factors_2 =  wsm[:, self.units * 5:self.units * 6].reshape(n_atoms * self.units, 1)
-        scaling_factors_3 =  wsm[:, self.units * 6:self.units * 7].reshape(n_atoms * self.units, 1)
+        scaling_factors_3 =  torch.abs(wsm[:, self.units * 6:self.units * 7].reshape(n_atoms * self.units, 1))
         kappa = wsm[:, self.units * 7:self.units * 8].reshape(n_atoms * self.units, 1)
         kappa2 = torch.nn.functional.softplus(wsm[:, self.units * 8:self.units * 9].reshape(n_atoms * self.units, 1))
         VMF_factors = wsm[:, self.units * 9:self.units * 10].reshape(n_atoms * self.units, 1)
         final_scaling = torch.exp(wsm[:, self.units * 10:self.units * 11].reshape(n_atoms * self.units, 1))
-        scaling_factors = 3*torch.softmax(torch.cat([scaling_factors_1, scaling_factors_2, scaling_factors_3], dim=-1), dim=-1)
-        S1, S2, S3 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None], scaling_factors[:, 2][:, None, None]
-        X_tens = S1*self.symm_tensor(X_tens).view(-1, 3, 3) + S2*self.symm_tensor(X_vec_tens).view(-1, 3, 3) + S3*self.symm_tensor(X_scal_tens).view(-1, 3, 3)
+        scaling_factors = torch.softmax(torch.cat([scaling_factors_1, scaling_factors_2], dim=-1), dim=-1)
+        S1, S2 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None]
+        X_tens = S1*self.normalize_matrix(self.symm_tensor(X_tens)).view(-1, 3, 3) + S2*torch.eye(3, device=self.device).unsqueeze(0).expand(n_atoms * self.units, 3, 3)
 
         cov_final = self.normalize_matrix(X_tens).view(n_atoms * self.units, 3, 3)
         cov_final = cov_final * final_scaling.view(-1, 1, 1)
         cov_final = self.construct_pos_def(cov_final)
 
-        pos_disp_final = pos_disp*pos_factors + pos_disp_2*pos_factors_2 +  VMF_Vec * VMF_factors
+        pos_disp_final = pos_disp*pos_factors + pos_disp_2*pos_factors_2 #+ VMF_Vec * VMF_factors
         VMF_Vec = VMF_Vec * VMF_factors
 
         result = {"cov": cov_final,
@@ -310,26 +299,11 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         return matrix
 
     def remove_vector_component(self, matrix):
-        #matrix = matrix.view(-1, 3, 3)
-        n_atoms = matrix.shape[0]
-        matrix_decomp = self.tens_irrep.from_cartesian(matrix)
-        matrix_resh = torch.cat([matrix_decomp[:, :, 0].reshape(n_atoms, self.units, 1),
-                                 matrix_decomp[:, :, 4:9].reshape(n_atoms, self.units, 5)
-                                 ], dim=-1)
-        matrix_resh = self.sym_tens_irrep.to_cartesian(matrix_resh)
-        return matrix_resh
+        vec_part = (1/2) * (matrix - matrix.transpose(-1, -2))
+        return matrix - vec_part
 
     def slice(self, tensor, n_multiples):
         return torch.cat([tensor[i, torch.arange(tensor.size(1))[:num_selections]] for i, num_selections in enumerate(n_multiples)])
-
-    def forward_fctp_module(self,
-                            cov_irrep,
-                            pos_embed_tensor,
-                            embeds_and_scalars):
-        fctp_weights = self.fctp_weights(embeds_and_scalars)
-        full_irrep = self.fctp(cov_irrep, pos_embed_tensor, fctp_weights)
-
-        return full_irrep
 
     def construct_pos_def(self, matrix: torch.tensor):
         """
@@ -562,7 +536,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             self.val_iter += 1
         if self.plot_gaus_pos:
             pos = atom_positions.reshape(result['n_multiples'].shape[0], -1)
-            gaus_pos = pos_disp + pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
+            pos = pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
+            gaus_pos = pos_disp + pos
             origin_atoms = qm9_mol.get_chemical_symbols()
             origin_atoms = np.repeat(origin_atoms, result['n_multiples'].detach().cpu().numpy())
             self.plot_gaussian_positions(atom_types=qm9_mol.get_chemical_symbols(),
@@ -572,6 +547,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                         gaus_positions=gaus_pos,
                                          origin_atoms=origin_atoms,
                                          origin_pos=pos,
+                                         covariance_matrices=X,
                                      filename=f'{self.gaus_pos_path_val}_iter_{self.val_iter}_{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}.html')
 
         return loss
@@ -766,7 +742,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             )
         if self.plot_gaus_pos:
             pos = atom_positions.reshape(result['n_multiples'].shape[0], -1)
-            gaus_pos = pos_disp + pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
+            pos = pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
+            gaus_pos = pos_disp + pos
             origin_atoms = qm9_mol.get_chemical_symbols()
             origin_atoms = np.repeat(origin_atoms, result['n_multiples'].detach().cpu().numpy())
             self.plot_gaussian_positions(atom_types=qm9_mol.get_chemical_symbols(),
@@ -776,6 +753,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                          gaus_positions=gaus_pos,
                                          origin_atoms=origin_atoms,
                                          origin_pos=pos,
+                                         covariance_matrices=X,
                                      filename=f'{self.gaus_pos_path_test}{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}_batchidx_{batch_idx}.html')
         return loss
 
@@ -988,7 +966,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         emb_layer.to(self.device)
         self.emb_layer = emb_layer
         cut_fn = PolynomialCutoff(cutoff=self.config['hotpp_cutoff'], p=13)
-        radial_fn = BesselPoly(r_max=2*self.config['hotpp_cutoff'], n_max=self.config['master_units'], cutoff_fn=cut_fn)
+        radial_fn = BesselPoly(r_max=self.config['hotpp_cutoff'], n_max=self.config['master_units'], cutoff_fn=cut_fn)
         nlayers = self.config['hotpp_nlayers']
         if self.config['miaonet'] == "miaomiao":
             self.base_model = MiaoMiaoNet(embedding_layer=emb_layer,
@@ -1057,6 +1035,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                 weights,
                                 atom_positions,
                                 gaus_positions,
+                                covariance_matrices,
                                 origin_atoms,
                                 origin_pos,
                                 filename):
@@ -1071,6 +1050,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             scal_mults = scal_mults.detach().cpu().numpy()
         if isinstance(weights, torch.Tensor):
             weights = weights.detach().cpu().numpy()
+        if isinstance(covariance_matrices, torch.Tensor):
+            covariance_matrices = covariance_matrices.detach().cpu().numpy()
 
         # Define a mapping for atom types to colors
         atom_color_map = {
@@ -1116,26 +1097,43 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         # Determine colors based on sign of scal_mults
         gaussian_colors = ['blue' if scal < 0 else 'red' for scal in scal_mults]
 
-        # Compute sizes for Gaussian points using absolute product of scal_mults and weights
-        gaussian_sizes = abs(scal_mults * weights)  # Adjust size scaling factor if needed
-        gaussian_sizes = (np.log(gaussian_sizes / gaussian_sizes.min()) + 1) * 3
         # Gaussian hover text (position and origin info)
         hover_text_gaussians = [
             f"Position: ({gp[0]:.2f}, {gp[1]:.2f}, {gp[2]:.2f})<br>" +
             f"Origin: {origin_atoms[i]} at ({op[0]:.2f}, {op[1]:.2f}, {op[2]:.2f})"
             for i, (gp, op) in enumerate(zip(gaus_positions, origin_pos))
         ]
-        # Create the 3D scatter plot for gaussian positions
-        trace_gaussians = go.Scatter3d(
-            x=gaus_positions[:, 0],
-            y=gaus_positions[:, 1],
-            z=gaus_positions[:, 2],
-            mode='markers',
-            marker=dict(size=gaussian_sizes, color=gaussian_colors, opacity=0.5),
-            showlegend=False,
-            text=hover_text_gaussians,
-            hoverinfo='text',  # Set hoverinfo to show custom text]
-        )
+
+        # Plot each Gaussian as an ellipsoid
+        ellipsoids = []
+        for i, (center, cov_matrix) in enumerate(zip(gaus_positions, covariance_matrices)):
+            # Get eigenvalues and eigenvectors for the covariance matrix
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+            radii = np.sqrt(eigenvalues)  # Scale factors for each axis
+
+            # Create a mesh grid of points for the ellipsoid in its local coordinates
+            u = np.linspace(0, 2 * np.pi, 20)
+            v = np.linspace(0, np.pi, 10)
+            x = radii[0] * np.outer(np.cos(u), np.sin(v))
+            y = radii[1] * np.outer(np.sin(u), np.sin(v))
+            z = radii[2] * np.outer(np.ones_like(u), np.cos(v))
+
+            # Transform points to align with eigenvectors and center at Gaussian position
+            scale = 0.1
+            ellipsoid_points = 0.1 * np.dot(eigenvectors, np.array([x.flatten(), y.flatten(), z.flatten()]))
+            x_ellipsoid = ellipsoid_points[0].reshape(x.shape) + center[0]
+            y_ellipsoid = ellipsoid_points[1].reshape(y.shape) + center[1]
+            z_ellipsoid = ellipsoid_points[2].reshape(z.shape) + center[2]
+
+            # Add ellipsoid as a surface plot to represent the Gaussian shape
+            ellipsoids.append(
+                go.Surface(
+                    x=x_ellipsoid, y=y_ellipsoid, z=z_ellipsoid,
+                    opacity=1.0, colorscale=[[0, gaussian_colors[i]], [1, gaussian_colors[i]]],
+                    showscale=False, showlegend=False, hoverinfo='text',
+                    text=hover_text_gaussians[i]
+                )
+            )
 
         # Add a dummy trace for the atom color legend
         atom_legend_traces = []
@@ -1183,8 +1181,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         )
 
         # Create the figure
-        fig = go.Figure(data=[trace_atoms] + atom_legend_traces + gaussian_sign_legend + [trace_gaussians],
-                        layout=layout)
+        fig = go.Figure(data=[trace_atoms] + atom_legend_traces + gaussian_sign_legend + ellipsoids, layout=layout)
 
         # Save the interactive plot to an HTML file
         pio.write_html(fig, file=filename, auto_open=False)
