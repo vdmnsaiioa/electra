@@ -1,6 +1,6 @@
 project_name: ELECTRA_UM
 eq_check: False
-wandb: True
+wandb: False
 
 # New stuff
 inference_cutoff: 3.5

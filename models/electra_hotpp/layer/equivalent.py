@@ -205,9 +205,8 @@ class SelfInteractionLayer(nn.Module):
         self.mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.ReLU(),
+                nn.SiLU(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Sigmoid()
             ) for way in range(max_way + 1)])
 
     def forward(self,
@@ -303,9 +302,8 @@ class MultiBodyLayer(nn.Module):
         self.weight_mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.ReLU(),
+                nn.SiLU(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Sigmoid()
             ) for _ in range(max_way + 1)])
         n_body_tensors = [[1] *  (max_way + 1)]
         for n in range(max_n_body - 1):
@@ -382,10 +380,8 @@ class GraphConvLayer(nn.Module):
         self.rbf_node_mixing_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(output_dim * 3, output_dim, bias=True),
-                nn.ReLU(),
-                nn.Linear(output_dim, output_dim, bias=True),
-                nn.Sigmoid()
-            )
+                nn.SiLU(),
+                nn.Linear(output_dim, output_dim, bias=True),            )
             for r_way in range(max_r_way + 1)
         ])
         if conv_mode == 'node_j':

@@ -10,14 +10,15 @@ class AtomicModule(L.LightningModule, nn.Module):
     def forward(self,
                 batch_data   : Dict[str, torch.Tensor],
                 properties   : Optional[List[str]]=None,
-                create_graph : bool=True
+                create_graph : bool=True,
+                symmetry_dict: Optional[Dict[str, torch.Tensor]]=None,
                 ) -> Dict[str, torch.Tensor]:
         # Use properties=None instead of properties=['energy'] because
         # Mutable default parameters are not supported because
         # Python binds them to the function and they persist across function calls.
         required_derivatives = torch.jit.annotate(List[str], [])
 
-        output_tensors = self.calculate(batch_data)
+        output_tensors = self.calculate(batch_data, symmetry_dict=symmetry_dict)
 
         return output_tensors
 

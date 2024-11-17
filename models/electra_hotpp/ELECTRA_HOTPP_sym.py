@@ -4,9 +4,11 @@ import time
 
 import wandb
 import logging
+from utils.symmetry_breaking import get_symmetries
 from tools.atom_tools import valence_electrons
 from ase.data import chemical_symbols
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS
+from utils.symmetry_breaking import get_symmetries
 from utils.model_handling import ModelIO, get_tag
 from typing import Literal
 from torch.utils.data import Dataset, DataLoader
@@ -152,6 +154,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
 
     def forward(self,
                 atoms,
+                symmetry_dict,
                 state_attr: torch.Tensor | None = None,
                 n_elec: int | None = None,
                 rotation_matrix: torch.Tensor | None = None,
@@ -185,7 +188,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         at_numbers = data['atomic_number']
         X_scal_full, X_vec_full, X_tens_full, init_emb = self.base_model(batch_data=data,
                                                                          properties=None,
-                                                                         create_graph=False)
+                                                                         create_graph=False,
+                                                                         symmetry_dict=symmetry_dict)
 
         X_scal = X_scal_full[0]
         X_scal_vec = X_scal_full[1]
@@ -251,14 +255,13 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         final_scaling = torch.exp(wsm[:, self.units * 10:self.units * 11].reshape(n_atoms * self.units, 1))
         scaling_factors = torch.softmax(torch.cat([scaling_factors_1, scaling_factors_2, scaling_factors_3], dim=-1), dim=-1)
         S1, S2, S3 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None], scaling_factors[:, 2][:, None, None]
-        #S1, S2, S3 = torch.exp(scaling_factors_1)[:, None], scaling_factors_2[:, None], torch.log(torch.abs(scaling_factors_3))[:, None]
-        X_tens = S1*self.normalize_matrix(self.symm_tensor(X_tens)).view(-1, 3, 3) + S2*self.normalize_matrix(self.symm_tensor(X_vec_tens)).view(-1, 3, 3) + S3*self.normalize_matrix(self.symm_tensor(X_scal_tens)).view(-1, 3, 3)
+        X_tens = S1*self.symm_tensor(X_tens).view(-1, 3, 3) + S2*self.symm_tensor(X_vec_tens).view(-1, 3, 3) + S3*self.symm_tensor(X_scal_tens).view(-1, 3, 3)
 
         cov_final = X_tens.view(n_atoms * self.units, 3, 3)
         cov_final = cov_final * final_scaling.view(-1, 1, 1)
         cov_final = self.construct_pos_def(cov_final)
 
-        pos_disp_final = pos_disp*os_factors + pos_disp_2*pos_factors_2 + VMF_Vec * VMF_factors
+        pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*pos_factors_2 + VMF_Vec * (VMF_factors**2)
         VMF_Vec = VMF_Vec * VMF_factors
 
         result = {"cov": cov_final,
@@ -335,12 +338,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                       batch,
                       batch_idx: int):
         start = time.process_time()
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, symmetry_dict = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
         atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
 
-        result = self(qm9_mol, n_elec=qm9_n_elec)
+        result = self(qm9_mol, n_elec=qm9_n_elec, symmetry_dict=symmetry_dict)
 
         weights = result['weights']
         pos_disp = result['pos_disp']
@@ -436,12 +439,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
     def validation_step(self,
                         batch,
                         batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, symmetry_dict = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
         atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
 
-        result = self(qm9_mol, n_elec=qm9_n_elec)
+        result = self(qm9_mol, n_elec=qm9_n_elec, symmetry_dict=symmetry_dict)
 
         weights = result['weights']
         pos_disp = result['pos_disp']
@@ -563,7 +566,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         """atom_types can be a list of atom types to predict the density for, e.g. [1,6] if only Hydrogen and Carbon.
         If None, all atoms are considered.
         atom_idxs can be a list of atom indices to predict the density for, e.g. [0,1,2] if only the first three atoms."""
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, symmetry_dict = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
 
@@ -579,7 +582,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         atom_positions = atom_positions.to(self.device)
         # g = g.to(self.device)
 
-        result = self(qm9_mol, n_elec=qm9_n_elec)
+        result = self(qm9_mol, n_elec=qm9_n_elec, symmetry_dict=symmetry_dict)
 
         weights = result['weights']
         pos_disp = result['pos_disp']
@@ -648,12 +651,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
     def test_step(self,
                         batch,
                         batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, symmetry_dict = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
         atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
 
-        result = self(qm9_mol, n_elec=qm9_n_elec)
+        result = self(qm9_mol, n_elec=qm9_n_elec, symmetry_dict=symmetry_dict)
 
         weights = result['weights']
         pos_disp = result['pos_disp']
@@ -766,13 +769,13 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                 translation = None,
                 inversion = False):
 
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, symmetry_dict = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
         grid_nonrot = torch.tensor(pos_grid)
         atom_positions_original = torch.tensor(qm9_mol.positions.copy(), device=self.device, dtype=torch.float)
 
-        result_nontransformed = self(qm9_mol.copy(), n_elec=qm9_n_elec, rotation_matrix=r_mat)
+        result_nontransformed = self(qm9_mol.copy(), n_elec=qm9_n_elec, rotation_matrix=r_mat, symmetry_dict=symmetry_dict)
 
         weights_nontransformed = result_nontransformed['weights']
         pos_disp_nontransformed = result_nontransformed['pos_disp']
@@ -797,20 +800,24 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             qm9_mol.positions = atom_positions.cpu().numpy()
             grid_nonrot = torch.tensor(pos_grid)
             pos_grid = self.rotate_vector(pos_grid.view(-1, 3), r_mat).view(pos_grid.shape)
+            symmetry_dict_transformed = get_symmetries(qm9_mol)
             result_transformed = self(atoms=qm9_mol,
                                       n_elec=qm9_n_elec,
                                       rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
+                                      orig_pos=positions_original,
+                                      symmetry_dict=symmetry_dict_transformed)
         if translation is not None:
             positions_original = torch.tensor(atom_positions_original)
             positions_original = positions_original.to(self.device)
             atom_positions = positions_original + translation
             qm9_mol.positions = atom_positions.cpu().numpy()
             pos_grid = pos_grid + translation
+            symmetry_dict_transformed = get_symmetries(qm9_mol)
             result_transformed = self(atoms=qm9_mol,
                                       n_elec=qm9_n_elec,
                                       rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
+                                      orig_pos=positions_original,
+                                      symmetry_dict=symmetry_dict_transformed)
 
         if inversion:
             positions_original = torch.tensor(atom_positions_original)
@@ -818,10 +825,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             atom_positions = -positions_original
             qm9_mol.positions = atom_positions.cpu().numpy()
             pos_grid = -pos_grid
+            symmetry_dict_transformed = get_symmetries(qm9_mol)
             result_transformed = self(atoms=qm9_mol,
                                       n_elec=qm9_n_elec,
                                       rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
+                                      orig_pos=positions_original,
+                                      symmetry_dict=symmetry_dict_transformed)
         weights_transformed = result_transformed['weights']
         pos_disp_transformed = result_transformed['pos_disp']
         X_transformed = result_transformed['cov']
@@ -1213,7 +1222,8 @@ class QM9Dataset(Dataset):
                 if mol_cd_file in self.cache:
                     return self.cache[mol_cd_file]
                 qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict = get_qm9_density(qm9_path)
-                self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file)
+                symmetry_dict = get_symmetries(qm9_mol)
+                self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, symmetry_dict)
                 valid = True
             except Exception as e:
                 idx = np.random.randint(0, len(self.file_list)-1)
