@@ -1,5 +1,5 @@
 project_name: ELECTRA_UM
-eq_check: False
+eq_check: True
 wandb: False
 
 # New stuff

@@ -258,7 +258,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         cov_final = cov_final * final_scaling.view(-1, 1, 1)
         cov_final = self.construct_pos_def(cov_final)
 
-        pos_disp_final = pos_disp*os_factors + pos_disp_2*pos_factors_2 + VMF_Vec * VMF_factors
+        pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*pos_factors_2 + VMF_Vec * (VMF_factors**2)
         VMF_Vec = VMF_Vec * VMF_factors
 
         result = {"cov": cov_final,

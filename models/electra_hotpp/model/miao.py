@@ -407,6 +407,7 @@ class MiaoNet(AtomicModule):
         positions = batch_data['coordinate']
         masses = batch_data['atomic_number']
         n_atoms = positions.shape[0]
+        COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
 
         # Calculate the moment of inertia tensor
         I = torch.zeros((n_atoms, 3, 3), device=positions.device)
@@ -417,11 +418,11 @@ class MiaoNet(AtomicModule):
             centered_positions = positions - centroid
             for j in range(len(masses)):
                 I[i] += (torch.eye(3, device=positions.device) * torch.linalg.norm(centered_positions[i]) ** 2 - torch.outer(centered_positions[j], centered_positions[j])) * masses[j]
-            vector_to_dot = centroid
             eigenvalues, axes_of_inertia = torch.linalg.eigh(I[i])
             ax_1 = axes_of_inertia[:, 0]  # First principal axis
             ax_2 = axes_of_inertia[:, 1]  # Second principal axis
             ax_3 = axes_of_inertia[:, 2]  # Third principal axis
+            vector_to_dot = centroid
 
             dot_products = torch.tensor([
                 torch.dot(ax_1, vector_to_dot),
@@ -436,12 +437,22 @@ class MiaoNet(AtomicModule):
         # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=positions.device).float() * 2 - 1)
             sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
             sorted_axes_aoi = sorted_axes_aoi[sorted_indices]
-            I[i] = I[i] / torch.linalg.norm(I[i])
+            I[i] = self.normalize_matrix(I[i])
             decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             all_axes[i] = sorted_axes_aoi
             dec_tensors[i] = decomposed_tensor
         n_vecs = 3
         return all_axes[:, :n_vecs, :], dec_tensors
+
+    def normalize_matrix(self, matrix):
+        orig_shape = matrix.shape
+        matrix = matrix.view(-1, 3, 3)
+        denom = torch.norm(matrix, dim=(-2, -1)).unsqueeze(-1).unsqueeze(-1)
+        denom = torch.where(denom == 0, torch.tensor(1.0, device=denom.device), denom)
+        # denom = denom.mean()
+        matrix = matrix / denom
+        matrix = matrix.view(orig_shape)
+        return matrix
 
     def split_tensor(self, tensor, ax_1, ax_2, ax_3):
         split_tensor = torch.zeros((5, 3, 3), device=tensor.device)
