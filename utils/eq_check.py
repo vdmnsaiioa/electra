@@ -22,6 +22,7 @@ def equivariance_check(model, train_loader):
     sample_rot = copy.deepcopy(sample_inv)
     sample_trans = copy.deepcopy(sample_inv)
     checks = [True, True, True]
+    print(f"Molecule: {sample_trans[0][-4].symbols}")
     if checks[0]:
         with torch.no_grad():
             fgx_eq, pred_base = model.eq_check_prediction(sample_rot, r_mat=rotation_matrix, inversion=False)

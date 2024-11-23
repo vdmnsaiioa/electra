@@ -1,5 +1,5 @@
 project_name: ELECTRA_UM
-eq_check: True
+eq_check: False
 wandb: False
 
 # New stuff
@@ -11,6 +11,7 @@ activation_type: silu
 use_sh: False
 plot_gaus_pos: True
 remove_vector_components: False
+use_pos_disp_functions: True
 
 model_type: hotpp
 miaonet: miaomiao
@@ -28,12 +29,11 @@ r_max: 3
 n_max: 3
 out_max: 3
 hotpp_cutoff: 6.0
-hotpp_nlayers: 6
+hotpp_nlayers: 4
 hotpp_outdim: 120
-use_graph_directly: True
 master_units: 120
 embed_type: aufbau
-
+precision: float
 
 # MODEL PARAMS
 negative_contributions: True
@@ -55,19 +55,19 @@ max_grid_points: 400000
 niflheim: False
 
 # FOLDERS
-qm9_dens_path: /Users/jels/Desktop/ELECTRA_CLEAN/QM9_Densities/Full
+qm9_dens_path: /Users/jels/Desktop/ELECTRA_MOI/QM9_Densities/Full
 
-data_split_path: /Users/jels/Desktop/ELECTRA_CLEAN/data_splits/
+data_split_path: /Users/jels/Desktop/ELECTRA_MOI/data_splits/
 
 
-pred_dens_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/pred_dens/validation/
-density_delta_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/density_deltas/validation
-pred_dens_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/pred_dens/test/
-density_delta_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/density_deltas/test
-gaus_pos_path_val: /Users/jels/Desktop/ELECTRA_CLEAN/gaussian_positions/validation/
-gaus_pos_path_test: /Users/jels/Desktop/ELECTRA_CLEAN/gaussian_positions/test/
+pred_dens_path_val: /Users/jels/Desktop/ELECTRA_MOI/pred_dens/validation/
+density_delta_path_val: /Users/jels/Desktop/ELECTRA_MOI/density_deltas/validation
+pred_dens_path_test: /Users/jels/Desktop/ELECTRA_MOI/pred_dens/test/
+density_delta_path_test: /Users/jels/Desktop/ELECTRA_MOI/density_deltas/test
+gaus_pos_path_val: /Users/jels/Desktop/ELECTRA_MOI/gaussian_positions/validation/
+gaus_pos_path_test: /Users/jels/Desktop/ELECTRA_MOI/gaussian_positions/test/
 
-model_dir: /Users/jels/Desktop/ELECTRA_CLEAN/trained_models
+model_dir: /Users/jels/Desktop/ELECTRA_MOI/trained_models
 
 load_model: False
 load_model_path: Null
@@ -76,7 +76,7 @@ load_model_path: Null
 optimizer: adamw
 n_epochs: 1000
 initial_lr: 0.001
-final_lr: 0.0003
+final_lr: 0.001
 n_warmups: 0
 clip_grad: False
 gradient_clip_value: 1.0

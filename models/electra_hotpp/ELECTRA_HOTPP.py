@@ -6,7 +6,6 @@ import wandb
 import logging
 from tools.atom_tools import valence_electrons
 from ase.data import chemical_symbols
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 from utils.model_handling import ModelIO, get_tag
 from typing import Literal
 from torch.utils.data import Dataset, DataLoader
@@ -15,8 +14,7 @@ import dgl
 import matgl
 import numpy as np
 import torch
-from models.ELECTRA.custom_cartesian_tensor import CartesianTensor
-from e3nn.o3 import FullyConnectedTensorProduct
+
 import plotly.graph_objs as go
 import plotly.io as pio
 from matgl.config import DEFAULT_ELEMENTS
@@ -96,7 +94,6 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         self.gaus_pos_path_test = config['gaus_pos_path_test']
         self.model_handler = model_handler
         self.best_val_loss = float("inf")
-        self.use_graph_directly = config['use_graph_directly']
         self.collate_func = CollateFuncAtoms(self.cutoff)
         self.g_converter = Atoms2Graph(cutoff=self.cutoff, element_types=('H', 'O', 'C', 'N', 'F', 'Cl', 'Br', 'I'))
         self.val_error_dict = {}
@@ -114,39 +111,23 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         self.init_hotpp_model()
         self.plot_gaus_pos = config['plot_gaus_pos']
 
-        irreps_out = f"{self.units}x0e + {self.units}x2e + {self.units}x0e + {self.units}x0e + {self.units}x1o"
-
-        ## FIRST FCTP
-        if not self.config['use_graph_directly']:
-            self.fctp = FullyConnectedTensorProduct(
-                irreps_in1=f"{self.units}x0e + {self.units}x2e",
-                irreps_in2=f"{2 * self.units}x0e + {self.units}x1o",
-                irreps_out=irreps_out,
-                shared_weights=False)
-            self.fctp_weights = torch.nn.Sequential(
-                torch.nn.Linear(4 * self.units, 4 * self.units),
-                torch.nn.ReLU(),
-                torch.nn.Linear(4 * self.units, int(2 * self.units / self.config['reduce_weight_by'])),
-                torch.nn.ReLU(),
-                torch.nn.Linear(int(2 * self.units / self.config['reduce_weight_by']), self.fctp.weight_numel),
-            )
-
-        self.scal_mult_mlp_direct = nn.Sequential(
-            nn.Linear(4 * self.units, self.units * 7),
-            nn.ReLU(),
-            nn.Linear(self.units * 7, self.units * 11)
+        self.wsm_network = nn.Sequential(
+            nn.Linear(4 * self.units, self.units * 3),
+            nn.SiLU(),
+            nn.Linear(self.units * 3, self.units * 2)
+        )
+        self.pos_factors_network = nn.Sequential(
+            nn.Linear(4 * self.units, self.units * 3),
+            nn.SiLU(),
+            nn.Linear(self.units * 3, self.units * 3),
         )
         ## ATOMIC TRANSFORM
-        self.atomic_transform = nn.Sequential(
-            nn.Linear(4 * self.units, self.units * 2),
-            nn.ReLU(),
-            nn.Linear(self.units * 2, self.units * 2),
+        self.matrix_factors_network = nn.Sequential(
+            nn.Linear(4 * self.units, self.units * 3),
+            nn.SiLU(),
+            nn.Linear(self.units * 3, self.units * 3),
         )
 
-
-        self.tens_irrep = CartesianTensor("ij")
-        self.sym_tens_irrep = CartesianTensor("ij=ji")
-        self.vec_irrep = CartesianTensor("i")
         self.precision = torch.float32
 
 
@@ -171,7 +152,6 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         # Obtain graph, with distances and relative position vectors
         idx_i, idx_j, offsets = neighbor_list("ijS", atoms, self.cutoff, self_interaction=False)
         offset = np.array(offsets) @ atoms.get_cell()
-
         data = {
             "atomic_number": torch.tensor(atoms.numbers, dtype=torch.long, device=self.device),
             "idx_i": torch.tensor(idx_i, dtype=torch.long, device=self.device),
@@ -228,46 +208,50 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
 
         X_vec_scal_2 = X_vec_scal
         X_tens_scal_2 = X_tens_scal
-        VMF_Vec = X_tens_vec.view(n_atoms * self.units, 3)
         pos_disp = X_vec.view(-1, 3)
         pos_disp_2 = X_scal_vec.view(-1, 3)
+        pos_disp_3 = X_tens_vec.view(-1, 3)
 
         #pos_disp = self.normalize_vector(pos_disp)
         #pos_disp_2 = self.normalize_vector(pos_disp_2)
-        #VMF_Vec = self.normalize_vector(VMF_Vec)
+        #pos_disp_3 = self.normalize_vector(pos_disp_3)
 
         wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal_2, X_tens_scal_2), dim=-1).view(n_atoms, -1)
-        wsm = self.scal_mult_mlp_direct(wsm_)
+        pos_scalars = self.pos_factors_network(wsm_)
+        matrix_scalars = self.matrix_factors_network(wsm_)
+        wsm = self.wsm_network(wsm_)
+
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
-        pos_factors = wsm[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
-        pos_factors_2 = wsm[:, self.units * 3:self.units * 4].reshape(n_atoms * self.units, 1)
-        scaling_factors_1 =  wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
-        scaling_factors_2 =  wsm[:, self.units * 5:self.units * 6].reshape(n_atoms * self.units, 1)
-        scaling_factors_3 =  torch.abs(wsm[:, self.units * 6:self.units * 7].reshape(n_atoms * self.units, 1))
-        kappa = wsm[:, self.units * 7:self.units * 8].reshape(n_atoms * self.units, 1)
-        kappa2 = torch.nn.functional.softplus(wsm[:, self.units * 8:self.units * 9].reshape(n_atoms * self.units, 1))
-        VMF_factors = wsm[:, self.units * 9:self.units * 10].reshape(n_atoms * self.units, 1)
-        final_scaling = torch.exp(wsm[:, self.units * 10:self.units * 11].reshape(n_atoms * self.units, 1))
-        scaling_factors = torch.softmax(torch.cat([scaling_factors_1, scaling_factors_2, scaling_factors_3], dim=-1), dim=-1)
-        S1, S2, S3 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None], scaling_factors[:, 2][:, None, None]
-        #S1, S2, S3 = torch.exp(scaling_factors_1)[:, None], scaling_factors_2[:, None], torch.log(torch.abs(scaling_factors_3))[:, None]
-        X_tens = S1*self.normalize_matrix(self.symm_tensor(X_tens)).view(-1, 3, 3) + S2*self.normalize_matrix(self.symm_tensor(X_vec_tens)).view(-1, 3, 3) + S3*self.normalize_matrix(self.symm_tensor(X_scal_tens)).view(-1, 3, 3)
 
-        cov_final = X_tens.view(n_atoms * self.units, 3, 3)
-        cov_final = cov_final * final_scaling.view(-1, 1, 1)
+        pos_factors = pos_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
+        pos_factors_2 = pos_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
+        pos_factors_3 = pos_scalars[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
+
+        mat_factors = matrix_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
+        mat_factors_2 = matrix_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
+        mat_factors_3 = matrix_scalars[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
+
+        scaling_factors = torch.softmax(torch.cat([mat_factors, mat_factors_2, mat_factors_3], dim=-1), dim=-1)
+        S1, S2, S3 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None], scaling_factors[:, 2][:, None, None]
+        X_tens = S1*self.symm_tensor(X_tens).view(-1, 3, 3) + S2*self.symm_tensor(X_vec_tens).view(-1, 3, 3) + S3*self.symm_tensor(X_scal_tens).view(-1, 3, 3)
+
+        cov_final = X_tens.view(-1, 3, 3)
         cov_final = self.construct_pos_def(cov_final)
 
-        pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*pos_factors_2 + VMF_Vec * (VMF_factors**2)
-        VMF_Vec = VMF_Vec * VMF_factors
+        if self.config['use_pos_disp_functions']:
+            pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*pos_factors_2 + pos_disp_3 * (pos_factors_3**2)
+        else:
+            pos_disp_final = pos_disp * pos_factors + pos_disp_2 * pos_factors_2 + pos_disp_3 * pos_factors_3
+        VMF_Vec = pos_disp_3 * pos_factors_3
 
         result = {"cov": cov_final,
                   "pos_disp": pos_disp_final,
                   "weights": weights_sm,
                   "scal_mults": scal_mults_th,
                   "n_multiples": n_multiples,
-                  "kappa": kappa,
-                  "kappa2": kappa2,
+                  "kappa": torch.ones_like(weights_sm),
+                  "kappa2": torch.ones_like(weights_sm),
                   "VMF_vec": VMF_Vec.view(-1, 3)}
 
         end = time.process_time()
@@ -278,9 +262,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         return result
 
     def symm_tensor(self, matrix):
-        denom = torch.norm(matrix, dim=(-2, -1)).unsqueeze(-1).unsqueeze(-1)
-        denom = torch.where(denom == 0, torch.tensor(1.0, device=denom.device), denom)
-        symm_matrix = torch.matmul(matrix, matrix.transpose(-1, -2)) / denom
+        #denom = torch.norm(matrix, dim=(-2, -1)).unsqueeze(-1).unsqueeze(-1)
+        #denom = torch.where(denom == 0, torch.tensor(1.0, device=denom.device), denom)
+        symm_matrix = torch.matmul(matrix, matrix.transpose(-1, -2)) #/ denom
         return symm_matrix
 
     def normalize_vector(self, vector):
@@ -987,6 +971,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                       norm_factor=1.,
                                       bilinear=False,
                                       norm_heads=self.config['norm_heads'],
+                                     norm_blocks=self.config['norm_blocks'],
                                       conv_mode=self.config['conv_mode'],
                                       update_edge=self.config['update_edge'])
         else:

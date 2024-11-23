@@ -11,6 +11,7 @@ activation_type: silu
 use_sh: False
 plot_gaus_pos: True
 remove_vector_components: True
+use_pos_disp_functions: True
 
 model_type: hotpp
 miaonet: miaomiao

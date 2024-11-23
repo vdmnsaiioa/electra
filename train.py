@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 def run():
     if torch.cuda.is_available():
-        stream = open("/home/energy/jels/ELECTRA_CLEAN/niflheim_config.yaml")
+        stream = open("/home/energy/jels/ELECTRA_MOI/niflheim_config.yaml")
         torch.set_float32_matmul_precision('highest')
     else:
         stream = open("config.yaml")
@@ -49,7 +49,9 @@ def run():
                         #profiler="advanced",
                         max_epochs=250,
                         gradient_clip_algorithm='value',
-                        max_time=max_time)
+                        max_time=max_time,
+                        #detect_anomaly=True
+                        )
     if config['wandb']:
         wb_name = trainer.logger.experiment.name
         tag = get_tag(wb_name)

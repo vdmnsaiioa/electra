@@ -207,8 +207,8 @@ class SelfInteractionLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.SiLU(),
                 nn.Linear(output_dim, output_dim, bias=True),
+                nn.Tanh()
             ) for way in range(max_way + 1)])
-
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
                 ) -> Dict[int, torch.Tensor]:
@@ -221,7 +221,7 @@ class SelfInteractionLayer(nn.Module):
                     weights = weights.unsqueeze(-1)
                 input_tensor = torch.transpose(input_tensors[way], 1, -1)
                 output_tensor = linear(input_tensor)
-                output_tensors[way] = torch.transpose(output_tensor, 1, -1) * weights # (ELECTRA): THIS WEIGHTS HAS BEEN ADDED TO MAKE A NONLINEAR VERSION:
+                output_tensors[way] = torch.transpose(output_tensor, 1, -1) * weights # (ELECTRA): THIS WEIGHTS HAS BEEN ADDED TO MAKE A NONLINEAR VERSION
         return output_tensors
 
 
@@ -304,7 +304,9 @@ class MultiBodyLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.SiLU(),
                 nn.Linear(output_dim, output_dim, bias=True),
+                nn.Tanh()
             ) for _ in range(max_way + 1)])
+
         n_body_tensors = [[1] *  (max_way + 1)]
         for n in range(max_n_body - 1):
             self.combinations = []
@@ -381,9 +383,12 @@ class GraphConvLayer(nn.Module):
             nn.Sequential(
                 nn.Linear(output_dim * 3, output_dim, bias=True),
                 nn.SiLU(),
-                nn.Linear(output_dim, output_dim, bias=True),            )
+                nn.Linear(output_dim, output_dim, bias=True),
+                nn.Tanh()
+            )
             for r_way in range(max_r_way + 1)
         ])
+
         if conv_mode == 'node_j':
             self.U1 = SelfInteractionLayer(input_dim=input_dim, max_way=max_in_way, output_dim=output_dim)
             self.U2 = MultiBodyLayer(max_n_body=3, input_dim=input_dim, output_dim=output_dim, max_way=max_in_way)
@@ -413,6 +418,7 @@ class GraphConvLayer(nn.Module):
             if self.conv_mode == 'node_j':
                 x[in_way] = node_info[in_way][idx_j]
             elif self.conv_mode == 'node_edge':
+
                 x[in_way] = torch.cat([node_info[in_way][idx_i],
                                        node_info[in_way][idx_j],
                                        edge_info[in_way]], dim=1)

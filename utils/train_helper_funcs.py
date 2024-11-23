@@ -1,5 +1,4 @@
 from torch.optim import Adam, AdamW, SGD
-from torch_optimizer import shampoo
 import torch
 import numpy as np
 import random
@@ -24,10 +23,6 @@ def set_optimizer(tens_net, config):
                         lr=config['initial_lr'],
                         momentum=config['momentum'],
                         weight_decay=config['weight_decay'])
-    elif config['optimizer'] == 'shampoo':
-        optimizer = shampoo.Shampoo(tens_net.parameters(),
-                                    lr=config['initial_lr'],
-                                    weight_decay=config['weight_decay'])
     return optimizer
 
 
