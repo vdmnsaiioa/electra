@@ -179,39 +179,28 @@ class MiaoNet(AtomicModule):
             hidden_nodes, norm_factor, conv_mode, update_edge, n_layers)
         self.mean_vec_mlps_blocks = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(4 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
             nn.Sigmoid(),
         ) for _ in range(n_layers - 3)])
         self.l0_nets_blocks = nn.ModuleList([nn.Sequential(
-            nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
-            nn.SiLU(),
-            nn.Linear(4 * hidden_nodes[0], hidden_nodes[0]),
-            nn.LayerNorm(hidden_nodes[0]),
+            nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
+            nn.Mish(),
+            nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
+            nn.Tanh(),
         ) for _ in range(n_layers - 3)])
         self.mean_vec_mlps_heads = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(4 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
             nn.Sigmoid(),
         ) for _ in range(3)])
         self.l0_nets_heads = nn.ModuleList([nn.Sequential(
-            nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.LayerNorm(4 * hidden_nodes[0]),
-            nn.SiLU(),
-            nn.Linear(4 * hidden_nodes[0], hidden_nodes[0]),
-            nn.LayerNorm(hidden_nodes[0]),
+            nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
+            nn.Mish(),
+            nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
+            nn.Tanh(),
         ) for _ in range(3)])
-        self.init_scalars_mlp = nn.Sequential(
-            nn.Linear(hidden_nodes[0], hidden_nodes[0]),
-            nn.SiLU(),
-            nn.Linear(hidden_nodes[0], 3)
-        )
 
     def calculate(self,
                   batch_data : Dict[str, torch.Tensor]
@@ -283,10 +272,10 @@ class MiaoNet(AtomicModule):
         ni_dict[1] = pruned_vectors
         if block:
             ni_dict[0] = self.l0_nets_blocks[i](
-                torch.cat([ni_dict[0], torch.abs(dp_pc_nnv), torch.abs(dp_pc_rp), torch.abs(dp_rp_nv), norms_nv, norms_pc, norms_rel_pos], dim=-1))
+                torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
         else:
             ni_dict[0] = self.l0_nets_heads[i](
-                torch.cat([ni_dict[0], torch.abs(dp_pc_nnv), torch.abs(dp_pc_rp), torch.abs(dp_rp_nv), norms_nv, norms_pc, norms_rel_pos], dim=-1))
+                torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
         ni_dict[2] = self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), mean_vec_weights[:, n_units:])
         return ni_dict
 
@@ -401,21 +390,20 @@ class MiaoNet(AtomicModule):
             torch.dot(-ax_1, vector_to_dot),
         ])
 
-        #sorted_indices = torch.argsort(dot_products, descending=True)
-        sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=positions.device).float() * 2 - 1)
-        sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
-        #sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
-        #sorted_axes_aoi = sorted_axes_aoi[sorted_indices]
+        #sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=positions.device).float() * 2 - 1)
+        #sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
+        sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
+        sorted_indices = torch.argsort(dot_products, descending=True)
+        sorted_axes_aoi = sorted_axes_aoi[sorted_indices]
         n_vecs = 3
         I = I / torch.linalg.norm(I)
-        decomposed_tensor = self.split_tensor(I, sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
-        return sorted_axes_aoi[:n_vecs], decomposed_tensor
+        decomposed_tensor = self.split_tensor(I,  sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+        return sorted_axes_aoi[:n_vecs] , decomposed_tensor
 
     def get_individual_axes_of_inertia(self, batch_data, emb):
         positions = batch_data['coordinate']
         masses = batch_data['atomic_number']
         n_atoms = positions.shape[0]
-        init_scalars = self.init_scalars_mlp(emb)
         # Calculate the moment of inertia tensor
         I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
         dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
@@ -433,7 +421,7 @@ class MiaoNet(AtomicModule):
             ax_3 = axes_of_inertia[:, 2]  # Third principal axis
             sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
             # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
-            decomposed_tensor = self.split_tensor(I[i], init_scalars[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+            decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             all_axes[i] = sorted_axes_aoi
             dec_tensors[i] = decomposed_tensor
         n_vecs = 3
@@ -554,39 +542,37 @@ class MiaoNet(AtomicModule):
         matrix = matrix.view(orig_shape)
         return matrix
 
-    def split_tensor(self, tensor, init_scalars, ax_1, ax_2, ax_3):
+    def split_tensor(self, tensor, ax_1, ax_2, ax_3):
         split_tensor = torch.zeros((5, 3, 3), device=tensor.device, dtype=tensor.dtype)
-        scalar_part = torch.eye(3, device=tensor.device, dtype=tensor.dtype) * init_scalars
-        scalar_part_trace = (torch.trace(tensor) / 3) * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
-        deviatoric_tensor = tensor - scalar_part_trace * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
+        scalar_part = (torch.trace(tensor) / 3) * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
+
+        deviatoric_tensor = tensor - scalar_part * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
         # Use cross product to keep the matrix reflection invariant
         c12 = torch.cross(ax_1, ax_2)
         c23 = torch.cross(ax_2, ax_3)
         c31 = torch.cross(ax_3, ax_1)
-        ax3_tens = torch.tensor([[0, c12[2], -c12[1]], [-c12[2], 0, c12[0]], [c12[1], -c12[0], 0]])
-        ax1_tens = torch.tensor([[0, c23[2], -c23[1]], [-c23[2], 0, c23[0]], [c23[1], -c23[0], 0]])
-        ax2_tens = torch.tensor([[0, c31[2], -c31[1]], [-c31[2], 0, c31[0]], [c31[1], -c31[0], 0]])
+        ax1_tens = torch.tensor([[0, c12[2], -c12[1]], [-c12[2], 0, c12[0]], [c12[1], -c12[0], 0]])
+        ax2_tens = torch.tensor([[0, c23[2], -c23[1]], [-c23[2], 0, c23[0]], [c23[1], -c23[0], 0]])
+        ax3_tens = torch.tensor([[0, c31[2], -c31[1]], [-c31[2], 0, c31[0]], [c31[1], -c31[0], 0]])
         split_tensor[0] = scalar_part
         split_tensor[1] = deviatoric_tensor
-        split_tensor[2] = ax1_tens
-        split_tensor[3] = ax2_tens
-        split_tensor[4] = ax3_tens
+        split_tensor[2] = ax1_tens * (1/3)
+        split_tensor[3] = ax2_tens * (1/3)
+        split_tensor[4] = ax3_tens * (1/3)
         return split_tensor
 
     def split_batch_tensor(self, tensor, weights):
         n_atoms, n_units = tensor.shape[0], tensor.shape[1]
-        scalar_part = torch.vmap(torch.trace)(tensor.reshape(-1, 3, 3)) / 3
-        scalar_part = scalar_part.view(n_atoms, n_units)[:, :, None, None] * torch.eye(3, device=tensor.device).unsqueeze(0).unsqueeze(0).expand(n_atoms, n_units, -1, -1)
-        skew_part = (1/2) * (tensor - torch.transpose(tensor, -1, -2))
-        sym_part = (1/2) * (tensor + torch.transpose(tensor, -1, -2))
-        output_tensors = weights[:, 0:n_units][:, :, None, None] * scalar_part + weights[:, n_units:2*n_units][:, :, None, None] * sym_part + weights[:, 2*n_units:3*n_units][:, :, None, None] * skew_part
+        scalar_part = (torch.vmap(torch.trace)(tensor.reshape(-1, 3, 3)) / 3).reshape(n_atoms, n_units, 1, 1) * torch.eye(3, device=tensor.device).unsqueeze(0).unsqueeze(0).expand(n_atoms, n_units, -1, -1) *  weights[:, 0:n_units][:, :, None, None]
+        skew_part = (1/2) * (tensor - torch.transpose(tensor, -1, -2)) * weights[:, 2*n_units:3*n_units][:, :, None, None]
+        sym_part = (1/2) * (tensor + torch.transpose(tensor, -1, -2)) * weights[:, n_units:2*n_units][:, :, None, None]
+        output_tensors = scalar_part + sym_part +  skew_part
         return output_tensors
 
     def get_individual_axes_of_inertia_alt(self, batch_data, emb):
         positions = batch_data['coordinate']
         masses = batch_data['atomic_number']
         n_atoms = positions.shape[0]
-        init_scalars = self.init_scalars_mlp(emb)
         # Calculate the moment of inertia tensor
         I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
         dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
@@ -637,7 +623,7 @@ class MiaoNet(AtomicModule):
                             sorted_indices = torch.argsort(dot_with_breaker, descending=True)
                             all_axes[i][j] = to_align[sorted_indices][0]
                         else:
-                            all_axes[i][j] = torch.zeros_like(ax, device=ax.device)
+                            all_axes[i][j] = ax
                     else:
                         all_axes[i][j] = prelim_all_axes[i][j]
 

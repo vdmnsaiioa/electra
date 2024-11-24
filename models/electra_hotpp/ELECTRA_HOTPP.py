@@ -110,21 +110,25 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
 
         self.init_hotpp_model()
         self.plot_gaus_pos = config['plot_gaus_pos']
+        if self.config['niflheim']:
+            self.simple_gaus = True
+        else:
+            self.simple_gaus = False
 
         self.wsm_network = nn.Sequential(
             nn.Linear(4 * self.units, self.units * 3),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(self.units * 3, self.units * 2)
         )
         self.pos_factors_network = nn.Sequential(
             nn.Linear(4 * self.units, self.units * 3),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
         ## ATOMIC TRANSFORM
         self.matrix_factors_network = nn.Sequential(
             nn.Linear(4 * self.units, self.units * 3),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
 
@@ -240,7 +244,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         cov_final = self.construct_pos_def(cov_final)
 
         if self.config['use_pos_disp_functions']:
-            pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*pos_factors_2 + pos_disp_3 * (pos_factors_3**2)
+            pos_disp_final = pos_disp*torch.exp(torch.round(pos_factors, decimals=1)) + pos_disp_2*pos_factors_2 + pos_disp_3 * (torch.round(pos_factors_3, decimals=1)**2)
         else:
             pos_disp_final = pos_disp * pos_factors + pos_disp_2 * pos_factors_2 + pos_disp_3 * pos_factors_3
         VMF_Vec = pos_disp_3 * pos_factors_3
@@ -535,7 +539,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                          origin_atoms=origin_atoms,
                                          origin_pos=pos,
                                          covariance_matrices=X,
-                                     filename=f'{self.gaus_pos_path_val}_iter_{self.val_iter}_{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}.html')
+                                     filename=f'{self.gaus_pos_path_val}_iter_{self.val_iter}_{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}.html',
+                                         simple=self.simple_gaus
+                                         )
 
         return loss
 
@@ -741,7 +747,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                          origin_atoms=origin_atoms,
                                          origin_pos=pos,
                                          covariance_matrices=X,
-                                     filename=f'{self.gaus_pos_path_test}{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}_batchidx_{batch_idx}.html')
+                                     filename=f'{self.gaus_pos_path_test}{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}_batchidx_{batch_idx}.html',
+                                         simple=self.simple_gaus
+                                         )
         return loss
 
     def eq_check_prediction(self,
@@ -1026,7 +1034,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                 covariance_matrices,
                                 origin_atoms,
                                 origin_pos,
-                                filename):
+                                filename,
+                                simple=True,
+                                ):
         # Convert tensors to numpy if needed
         if isinstance(atom_positions, torch.Tensor):
             atom_positions = atom_positions.detach().cpu().numpy()
@@ -1093,35 +1103,52 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         ]
 
         # Plot each Gaussian as an ellipsoid
-        ellipsoids = []
-        for i, (center, cov_matrix) in enumerate(zip(gaus_positions, covariance_matrices)):
-            # Get eigenvalues and eigenvectors for the covariance matrix
-            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
-            radii = np.sqrt(eigenvalues)  # Scale factors for each axis
-
-            # Create a mesh grid of points for the ellipsoid in its local coordinates
-            u = np.linspace(0, 2 * np.pi, 20)
-            v = np.linspace(0, np.pi, 10)
-            x = radii[0] * np.outer(np.cos(u), np.sin(v))
-            y = radii[1] * np.outer(np.sin(u), np.sin(v))
-            z = radii[2] * np.outer(np.ones_like(u), np.cos(v))
-
-            # Transform points to align with eigenvectors and center at Gaussian position
-            scale = 0.1
-            ellipsoid_points = 0.1 * np.dot(eigenvectors, np.array([x.flatten(), y.flatten(), z.flatten()]))
-            x_ellipsoid = ellipsoid_points[0].reshape(x.shape) + center[0]
-            y_ellipsoid = ellipsoid_points[1].reshape(y.shape) + center[1]
-            z_ellipsoid = ellipsoid_points[2].reshape(z.shape) + center[2]
-
-            # Add ellipsoid as a surface plot to represent the Gaussian shape
-            ellipsoids.append(
-                go.Surface(
-                    x=x_ellipsoid, y=y_ellipsoid, z=z_ellipsoid,
-                    opacity=1.0, colorscale=[[0, gaussian_colors[i]], [1, gaussian_colors[i]]],
-                    showscale=False, showlegend=False, hoverinfo='text',
-                    text=hover_text_gaussians[i]
-                )
+        if simple:
+            # Create the 3D scatter plot for gaussian positions
+            # Compute sizes for Gaussian points using absolute product of scal_mults and weights
+            gaussian_sizes = abs(scal_mults * weights)  # Adjust size scaling factor if needed
+            gaussian_sizes = (np.log(gaussian_sizes / gaussian_sizes.min()) + 1) * 3
+            trace_gaussians = go.Scatter3d(
+                x=gaus_positions[:, 0],
+                y=gaus_positions[:, 1],
+                z=gaus_positions[:, 2],
+                mode='markers',
+                marker=dict(size=gaussian_sizes, color=gaussian_colors, opacity=0.5),
+                showlegend=False,
+                text=hover_text_gaussians,
+                hoverinfo='text',  # Set hoverinfo to show custom text]
             )
+            trace_gaussians = [trace_gaussians]
+        else:
+            trace_gaussians = []
+            for i, (center, cov_matrix) in enumerate(zip(gaus_positions, covariance_matrices)):
+                # Get eigenvalues and eigenvectors for the covariance matrix
+                eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+                radii = np.sqrt(eigenvalues)  # Scale factors for each axis
+
+                # Create a mesh grid of points for the ellipsoid in its local coordinates
+                u = np.linspace(0, 2 * np.pi, 20)
+                v = np.linspace(0, np.pi, 10)
+                x = radii[0] * np.outer(np.cos(u), np.sin(v))
+                y = radii[1] * np.outer(np.sin(u), np.sin(v))
+                z = radii[2] * np.outer(np.ones_like(u), np.cos(v))
+
+                # Transform points to align with eigenvectors and center at Gaussian position
+                scale = 0.1
+                ellipsoid_points = 0.1 * np.dot(eigenvectors, np.array([x.flatten(), y.flatten(), z.flatten()]))
+                x_ellipsoid = ellipsoid_points[0].reshape(x.shape) + center[0]
+                y_ellipsoid = ellipsoid_points[1].reshape(y.shape) + center[1]
+                z_ellipsoid = ellipsoid_points[2].reshape(z.shape) + center[2]
+
+                # Add ellipsoid as a surface plot to represent the Gaussian shape
+                trace_gaussians.append(
+                    go.Surface(
+                        x=x_ellipsoid, y=y_ellipsoid, z=z_ellipsoid,
+                        opacity=1.0, colorscale=[[0, gaussian_colors[i]], [1, gaussian_colors[i]]],
+                        showscale=False, showlegend=False, hoverinfo='text',
+                        text=hover_text_gaussians[i]
+                    )
+                )
 
         # Add a dummy trace for the atom color legend
         atom_legend_traces = []
@@ -1169,7 +1196,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         )
 
         # Create the figure
-        fig = go.Figure(data=[trace_atoms] + atom_legend_traces + gaussian_sign_legend + ellipsoids, layout=layout)
+        fig = go.Figure(data=[trace_atoms] + atom_legend_traces + gaussian_sign_legend + trace_gaussians, layout=layout)
 
         # Save the interactive plot to an HTML file
         pio.write_html(fig, file=filename, auto_open=False)

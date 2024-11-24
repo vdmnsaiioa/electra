@@ -205,7 +205,7 @@ class SelfInteractionLayer(nn.Module):
         self.mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.SiLU(),
+                nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
                 nn.Tanh()
             ) for way in range(max_way + 1)])
@@ -302,7 +302,7 @@ class MultiBodyLayer(nn.Module):
         self.weight_mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.SiLU(),
+                nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
                 nn.Tanh()
             ) for _ in range(max_way + 1)])
@@ -381,9 +381,9 @@ class GraphConvLayer(nn.Module):
         ])
         self.rbf_node_mixing_list = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(output_dim * 3, output_dim, bias=True),
-                nn.SiLU(),
-                nn.Linear(output_dim, output_dim, bias=True),
+                nn.Linear(output_dim * 3, output_dim*3, bias=True),
+                nn.Mish(),
+                nn.Linear(output_dim*3, output_dim, bias=True),
                 nn.Tanh()
             )
             for r_way in range(max_r_way + 1)
