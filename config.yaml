@@ -1,5 +1,5 @@
 project_name: ELECTRA_UM
-eq_check: False
+eq_check: True
 wandb: False
 
 # New stuff
@@ -10,7 +10,13 @@ weigh_com_by_mass: False
 activation_type: silu
 use_sh: False
 plot_gaus_pos: True
+
+## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE:
 remove_vector_components: False
+negative_contributions: True # True ruins equivariance if the function is actually negative unfortunately - but we can semi-use a positive nonlinear activation and get decent equivariance
+prune: True
+## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE
+
 use_pos_disp_functions: True
 
 model_type: hotpp
@@ -20,23 +26,22 @@ head_activate_list: ['silu', 'silu', 'silu']
 #hotpp params
 use_vmf: False
 gaus_per_electrons: 10
-norm_heads: ['none', 'none', 'none']
+#norm_heads: ['none', 'none', 'none']
 norm_blocks: 'none'
 conv_mode: node_j
 update_edge: False
-#norm_heads: ['graph', 'graph', 'graph']
+norm_heads: ['graph', 'graph', 'graph']
 r_max: 3
 n_max: 3
 out_max: 3
 hotpp_cutoff: 6.0
-hotpp_nlayers: 4
+hotpp_nlayers: 6
 hotpp_outdim: 120
 master_units: 120
 embed_type: aufbau
 precision: float
 
 # MODEL PARAMS
-negative_contributions: True
 loss_type: "huber"
 loss_coef: 100
 huber_loss_threshold: 0.1

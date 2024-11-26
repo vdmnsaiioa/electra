@@ -226,7 +226,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         wsm = self.wsm_network(wsm_)
 
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
-        scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
+        scal_mults_th = torch.sigmoid(wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units))
 
         pos_factors = pos_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
         pos_factors_2 = pos_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
@@ -244,7 +244,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         cov_final = self.construct_pos_def(cov_final)
 
         if self.config['use_pos_disp_functions']:
-            pos_disp_final = pos_disp*torch.exp(torch.round(pos_factors, decimals=1)) + pos_disp_2*pos_factors_2 + pos_disp_3 * (torch.round(pos_factors_3, decimals=1)**2)
+            pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*torch.square(pos_factors_2) + pos_disp_3 * pos_factors_3
         else:
             pos_disp_final = pos_disp * pos_factors + pos_disp_2 * pos_factors_2 + pos_disp_3 * pos_factors_3
         VMF_Vec = pos_disp_3 * pos_factors_3
@@ -673,7 +673,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             VMF_vec=VMF_vec,
             use_vmf=self.config['use_vmf'],
             scales=scales_all_atoms,
-            scalar_mults=scalar_mults,
+            scalar_mults=scalar_mults if self.config['negative_contributions'] else None,
             n_multiples=result['n_multiples'],
             relu=self.config['relu'],
             cut_distance=self.config['inference_cutoff'],
@@ -740,7 +740,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             origin_atoms = qm9_mol.get_chemical_symbols()
             origin_atoms = np.repeat(origin_atoms, result['n_multiples'].detach().cpu().numpy())
             self.plot_gaussian_positions(atom_types=qm9_mol.get_chemical_symbols(),
-                                         scal_mults=scalar_mults,
+                                         scal_mults=scalar_mults if self.config['negative_contributions'] else None,
                                          weights=weights,
                                          atom_positions=atom_positions,
                                          gaus_positions=gaus_pos,
@@ -857,7 +857,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             VMF_vec=VMF_vec_nontransformed,
             use_vmf=self.config['use_vmf'],
             scales=weights_nontransformed.reshape(weights_nontransformed.shape[0], 1, 1),
-            scalar_mults=scalar_mults_nontransformed,
+            scalar_mults=scalar_mults_nontransformed if self.config['negative_contributions'] else None,
             n_multiples=result_nontransformed['n_multiples'],
             relu=self.config['relu'],
             cut_distance=self.config['inference_cutoff'],
@@ -890,7 +890,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                 VMF_vec=VMF_vec_transformed,
                 use_vmf=self.config['use_vmf'],
                 scales=weights_transformed.reshape(weights_transformed.shape[0], 1, 1),
-                scalar_mults=scalar_mults_transformed,
+                scalar_mults=scalar_mults_transformed if self.config['negative_contributions'] else None,
                 n_multiples=result_transformed['n_multiples'],
                 relu=self.config['relu'],
                 cut_distance=self.config['inference_cutoff'],
@@ -981,7 +981,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
                                       norm_heads=self.config['norm_heads'],
                                      norm_blocks=self.config['norm_blocks'],
                                       conv_mode=self.config['conv_mode'],
-                                      update_edge=self.config['update_edge'])
+                                      update_edge=self.config['update_edge'],
+                                     prune=self.config['prune'])
         else:
             self.base_model = MiaoNet(embedding_layer=emb_layer,
                               radial_fn=radial_fn,

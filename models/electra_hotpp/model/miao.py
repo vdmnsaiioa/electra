@@ -5,7 +5,7 @@ from torch.cuda import device
 
 from .base import AtomicModule
 from ..layer import EmbeddingLayer, RadialLayer, ReadoutLayer
-from ..layer.equivalent import NonLinearLayer, GraphConvLayer, SelfInteractionLayer
+from ..layer.equivalent import NonLinearLayer, GraphConvLayer, SelfInteractionLayer, FixedLinearTransformVector, FixedLinearTransformTensor
 from ..utils import find_distances, _scatter_add, res_add, TensorAggregateOP
 import copy
 from ase.data import chemical_symbols
@@ -56,6 +56,9 @@ class UpdateNodeBlock(nn.Module):
         n_atoms = batch_data['atomic_number'].shape[0]
         for way in message.keys():
             res_info[way] = _scatter_add(message[way], idx_i, dim_size=n_atoms) / self.norm_factor
+        res_info = self.non_linear(self.self_interact(res_info))
+        if self.norm is not None:
+            res_info = self.norm(res_info, batch_data['batch'], batch_data['n_atoms'])
         #plot_gaussian_arrows(batch_data['coordinate'], result[1], f"AA_temp_pos_plots/res_add_{mol_id}.html")
         return res_add(node_info, res_info)
 
@@ -163,6 +166,7 @@ class MiaoNet(AtomicModule):
                  bilinear        : bool=False,
                  conv_mode       : Literal['node_j', 'node_edge']='node_j',
                  update_edge     : bool=False,
+                 prune         : bool=False,
                  ):
         super().__init__()
         self.register_buffer("mean", torch.tensor(mean).float())
@@ -170,6 +174,7 @@ class MiaoNet(AtomicModule):
         self.embedding_layer = embedding_layer
         self.radial_fn = radial_fn
         self.max_out_heads = max_out_heads
+        self.prune = prune
 
         max_in_way = [1] + max_out_way[:-1]
         hidden_nodes = [embedding_layer.n_channel] + output_dim
@@ -180,40 +185,51 @@ class MiaoNet(AtomicModule):
         self.mean_vec_mlps_blocks = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
             nn.Mish(),
-            nn.Linear(4 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.Sigmoid(),
+            nn.Linear(4 * hidden_nodes[0], hidden_nodes[0]),
+            nn.LayerNorm(hidden_nodes[0])
+        ) for _ in range(n_layers - 3)])
+        self.split_tensor_weights_blocks = nn.ModuleList([nn.Sequential(
+            nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
+            nn.Mish(),
+            nn.Linear(4 * hidden_nodes[0], 3 * hidden_nodes[0]),
+            nn.LayerNorm(3*hidden_nodes[0])
         ) for _ in range(n_layers - 3)])
         self.l0_nets_blocks = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
             nn.Mish(),
             nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
-            nn.Tanh(),
         ) for _ in range(n_layers - 3)])
         self.mean_vec_mlps_heads = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
             nn.Mish(),
-            nn.Linear(4 * hidden_nodes[0], 4 * hidden_nodes[0]),
-            nn.Sigmoid(),
+            nn.Linear(4 * hidden_nodes[0], hidden_nodes[0]),
+            nn.LayerNorm(hidden_nodes[0]),
+        ) for _ in range(3)])
+        self.split_tensor_weights_heads = nn.ModuleList([nn.Sequential(
+            nn.Linear(7 * hidden_nodes[0], 4 * hidden_nodes[0]),
+            nn.Mish(),
+            nn.Linear(4 * hidden_nodes[0], 3*hidden_nodes[0]),
+            nn.LayerNorm(3*hidden_nodes[0])
         ) for _ in range(3)])
         self.l0_nets_heads = nn.ModuleList([nn.Sequential(
             nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
             nn.Mish(),
             nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
-            nn.Tanh(),
         ) for _ in range(3)])
+        self.init_aoi_linear = FixedLinearTransformVector(output_dim=hidden_nodes[0], freeze=True)
+        self.init_tensors_linear = FixedLinearTransformTensor(input_dim=5, output_dim=hidden_nodes[0], freeze=True)
 
     def calculate(self,
                   batch_data : Dict[str, torch.Tensor]
                   ) -> Dict[str, torch.Tensor]:
-        node_info, edge_info, init_embed, aoi = self.get_init_info(batch_data)
+        node_info, edge_info, init_embed, aoi, symmetries = self.get_init_info(batch_data)
         mol_ID = ''.join(map(str, batch_data['atomic_number'].tolist()))
         #plot_gaussian_arrows(batch_data['coordinate'], node_info[1],f"AA_temp_pos_plots/initial_gaussian_arrows_{mol_ID}.html")
         n_units = node_info[0].shape[1]
 
-        dp_mode = True
         for i, en_equivalent in enumerate(self.en_equivalent_blocks):
             node_info, edge_info = en_equivalent(node_info, edge_info, batch_data)
-            if dp_mode:
+            if self.prune:
                 node_info = self.prune_nodes(node_info, i, n_units, batch_data, block=True)
         #plot_gaussian_arrows(batch_data['coordinate'], node_info[1],f"AA_temp_pos_plots/gaus_ar_block_{i}_{mol_ID}.html")
         ni_1, ei_1 = ({i: node_info[i] for i in node_info.keys()},
@@ -227,17 +243,17 @@ class MiaoNet(AtomicModule):
 
         ## 1ST HEAD
         node_info_1, edge_info_1 = self.block_heads[0](ni_1, ei_1, batch_data)
-        if dp_mode:
+        if self.prune:
             node_info_1 = self.prune_nodes(node_info_1, 0, n_units, batch_data, block=False)
 
         ## 2ND HEAD
         node_info_2, edge_info_2 = self.block_heads[1](ni_2, ei_2, batch_data)
-        if dp_mode:
+        if self.prune:
             node_info_2 = self.prune_nodes(node_info_2, 1, n_units, batch_data, block=False)
 
         # 3RD HEAD
         node_info_3, edge_info_3 = self.block_heads[2](ni_3, ei_3, batch_data)
-        if dp_mode:
+        if self.prune:
             node_info_3 = self.prune_nodes(node_info_3, 2, n_units, batch_data, block=False)
         #plot_gaussian_arrows(batch_data['coordinate'], node_info_3[1], f"AA_temp_pos_plots/tensor_head_{mol_ID}.html")
         return node_info_1, node_info_2, node_info_3, init_embed
@@ -251,7 +267,6 @@ class MiaoNet(AtomicModule):
         rel_pos = rel_pos.unsqueeze(1).repeat(1, n_units, 1)
         norms_rel_pos = torch.linalg.norm(rel_pos, dim=-1)
         norm_rel_pos = self.normalize_vector(rel_pos)
-
         norms_nv = torch.linalg.norm(ni_dict[1], dim=-1)
         norm_node_vectors = self.normalize_vector(ni_dict[1])
         parallel_components = self.extract_parallel_components(ni_dict[1], ev_num=-1)
@@ -260,14 +275,16 @@ class MiaoNet(AtomicModule):
         dp_pc_nnv = torch.sum(norm_parallel_components * norm_node_vectors, dim=-1)
         dp_pc_rp = torch.sum(norm_parallel_components * norm_rel_pos, dim=-1)
         dp_rp_nv = torch.sum(norm_rel_pos * norm_node_vectors, dim=-1)
+
+        input_vec = torch.abs(torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
         if block:
-            mean_vec_weights = self.mean_vec_mlps_blocks[i](
-                torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
+            mean_vec_weights = self.mean_vec_mlps_blocks[i](input_vec)
+            split_tensor_weights = self.split_tensor_weights_blocks[i](input_vec)
         else:
-            mean_vec_weights = self.mean_vec_mlps_heads[i](
-                torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
+            mean_vec_weights = self.mean_vec_mlps_heads[i](input_vec)
+            split_tensor_weights = self.split_tensor_weights_heads[i](input_vec)
         vectors_to_subtract_l1 = norm_parallel_components * mean_vec_weights[:, 0:n_units].unsqueeze(-1)
-        pruned_vectors = norm_node_vectors - vectors_to_subtract_l1
+        pruned_vectors = ni_dict[1] - vectors_to_subtract_l1
         pruned_vectors = self.normalize_vector(pruned_vectors)
         ni_dict[1] = pruned_vectors
         if block:
@@ -276,7 +293,7 @@ class MiaoNet(AtomicModule):
         else:
             ni_dict[0] = self.l0_nets_heads[i](
                 torch.cat([ni_dict[0], dp_pc_nnv, dp_pc_rp, dp_rp_nv, norms_nv, norms_pc, norms_rel_pos], dim=-1))
-        ni_dict[2] = self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), mean_vec_weights[:, n_units:])
+        ni_dict[2] = self.split_batch_tensor(ni_dict[2], split_tensor_weights)
         return ni_dict
 
     def get_init_info(self,
@@ -284,8 +301,8 @@ class MiaoNet(AtomicModule):
                       )->Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
         emb = self.embedding_layer(batch_data=batch_data)
 
-        sb_axes, l2_tensor = self.get_individual_axes_of_inertia(batch_data, emb)
-        # sb_axes, l2_tensor = self.get_individual_axes_of_inertia_alt(batch_data, emb)
+        sb_axes, l2_tensor, symmetries = self.get_individual_axes_of_inertia(batch_data, emb)
+        #sb_axes, l2_tensor = self.get_individual_axes_of_inertia_alt(batch_data, emb)
         n_ax_oi = sb_axes.shape[1]
 
         n_atoms, emb_dim = emb.shape
@@ -304,7 +321,7 @@ class MiaoNet(AtomicModule):
         _, dij, _ = find_distances(batch_data)
         rbf = self.radial_fn(dij)
         edge_info = {0: rbf}
-        return node_info, edge_info, emb, emb_l1
+        return node_info, edge_info, emb, emb_l1, symmetries
 
     def normalize_vector(self, vector):
         denom = torch.norm(vector, dim=-1, keepdim=True)
@@ -360,11 +377,10 @@ class MiaoNet(AtomicModule):
                       conv_mode=conv_mode,
                       update_edge=update_edge,
                       ) for i in range(3)])
-    def get_axes_of_inertia(self, batch_data):
+    def get_axes_of_inertia(self, batch_data, centroid):
         positions = batch_data['coordinate']
         masses = batch_data['atomic_number']
         COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
-        centroid = torch.mean(positions, axis=0)
 
         # Center the positions
         centered_positions = positions - COM
@@ -374,27 +390,29 @@ class MiaoNet(AtomicModule):
         for i in range(len(masses)):
             I += (torch.eye(3, device=positions.device) * torch.linalg.norm(centered_positions[i]) ** 2 - torch.outer(
                 centered_positions[i], centered_positions[i])) * masses[i]
-        vector_to_dot = COM
 
         eigenvalues, axes_of_inertia = torch.linalg.eigh(I)
         ax_1 = axes_of_inertia[:, 0]  # First principal axis
         ax_2 = axes_of_inertia[:, 1]  # Second principal axis
         ax_3 = axes_of_inertia[:, 2]  # Third principal axis
+        if centroid is not None:
+            vector_to_dot = COM - centroid
+            dot_products = torch.tensor([
+                torch.dot(ax_1, vector_to_dot),
+                torch.dot(ax_2, vector_to_dot),
+                torch.dot(ax_3, vector_to_dot),
+                torch.dot(-ax_3, vector_to_dot),
+                torch.dot(-ax_2, vector_to_dot),
+                torch.dot(-ax_1, vector_to_dot),
+            ])
 
-        dot_products = torch.tensor([
-            torch.dot(ax_1, vector_to_dot),
-            torch.dot(ax_2, vector_to_dot),
-            torch.dot(ax_3, vector_to_dot),
-            torch.dot(-ax_3, vector_to_dot),
-            torch.dot(-ax_2, vector_to_dot),
-            torch.dot(-ax_1, vector_to_dot),
-        ])
-
-        #sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=positions.device).float() * 2 - 1)
-        #sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
-        sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
-        sorted_indices = torch.argsort(dot_products, descending=True)
-        sorted_axes_aoi = sorted_axes_aoi[sorted_indices]
+            #sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=positions.device).float() * 2 - 1)
+            #sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
+            sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
+            sorted_indices = torch.argsort(dot_products, descending=True)
+            sorted_axes_aoi = sorted_axes_aoi[sorted_indices]
+        else:
+            sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
         n_vecs = 3
         I = I / torch.linalg.norm(I)
         decomposed_tensor = self.split_tensor(I,  sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
@@ -408,10 +426,13 @@ class MiaoNet(AtomicModule):
         I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
         dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
         all_axes = torch.zeros((n_atoms, 6, 3), device=positions.device, dtype=positions.dtype)
+        all_align_tensors = torch.zeros((n_atoms, 3), device=positions.device, dtype=positions.dtype)
+        COM_axes_default, _ = self.get_axes_of_inertia(batch_data, None)
+        COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
         for i in range(n_atoms):
             centroid = positions[i]
             centered_positions = positions - centroid
-            COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
+            COM_axes, COM_dec_tensor = self.get_axes_of_inertia(batch_data, centroid)
 
             for j in range(n_atoms):
                 I[i] += (torch.eye(3, device=positions.device, dtype=positions.dtype) * torch.linalg.norm(centered_positions[j]) ** 2 - torch.outer(centered_positions[j], centered_positions[j])) * masses[j]
@@ -419,13 +440,18 @@ class MiaoNet(AtomicModule):
             ax_1 = axes_of_inertia[:, 0]  # First principal axis
             ax_2 = axes_of_inertia[:, 1]  # Second principal axis
             ax_3 = axes_of_inertia[:, 2]  # Third principal axis
-            sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
-            # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
-            decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+            #sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
+            sorted_axes_aoi, aligned_tensor = self.canonicalize_aoi_COM_aoi(COM_axes, ax_1, ax_2, ax_3, centroid, COM)
+            decomposed_tensor = self.split_tensor(self.normalize_matrix(I[i]), sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             all_axes[i] = sorted_axes_aoi
             dec_tensors[i] = decomposed_tensor
+            all_align_tensors[i] = aligned_tensor
         n_vecs = 3
-        return all_axes[:, :n_vecs, :], dec_tensors
+        all_axes_full = self.init_aoi_linear(all_axes[:, :n_vecs, :])
+        dec_tensors_full = self.init_tensors_linear(dec_tensors)
+        symmetry_dict = {"axes_symmetries": all_align_tensors, "COM_axes": COM_axes_default}
+        return all_axes_full, dec_tensors_full, symmetry_dict
+        #return all_axes[:, :n_vecs, :], dec_tensors
 
     def canonicalize_aoi_simple(self, vector_to_dot, ax_1, ax_2, ax_3):
         dot_products_1 = torch.tensor([
@@ -453,6 +479,82 @@ class MiaoNet(AtomicModule):
         sorted_axes_aoi = torch.stack([sa_aoi_1[0], sa_aoi_2[0], sa_aoi_3[0], sa_aoi_3[1], sa_aoi_2[1], sa_aoi_1[1]])
         return sorted_axes_aoi
 
+    def canonicalize_aoi_COM_aoi(self, COM_axes, ax_1, ax_2, ax_3, centroid, COM):
+        COM_a1 = COM_axes[0]
+        COM_a2 = COM_axes[1]
+        COM_a3 = COM_axes[2]
+        aligned_tensor = torch.tensor([0, 0, 0], device=COM.device, dtype=torch.bool)
+        dot_vec = COM-centroid
+        dots_with_rel_vec = torch.tensor([
+            torch.dot(ax_1, dot_vec),
+            torch.dot(ax_2, dot_vec),
+            torch.dot(ax_3, dot_vec),
+        ])
+        if torch.abs(dots_with_rel_vec[0]) > 0.01:
+            vector_to_use_1 = dot_vec
+            aligned_tensor[0] = True
+        else:
+            find_axis_dot_products_1 = torch.abs(torch.tensor([
+                torch.dot(ax_1, COM_a1),
+                torch.dot(ax_1, COM_a2),
+                torch.dot(ax_1, COM_a3),
+            ]))
+            vector_to_use_1 = COM_axes[torch.argmax(find_axis_dot_products_1)]
+
+        if torch.abs(dots_with_rel_vec[1]) > 0.01:
+            vector_to_use_2 = dot_vec
+            aligned_tensor[1] = True
+        else:
+            find_axis_dot_products_2 = torch.abs(torch.tensor([
+                torch.dot(ax_2, COM_a1),
+                torch.dot(ax_2, COM_a2),
+                torch.dot(ax_2, COM_a3),
+            ]))
+            vector_to_use_2 = COM_axes[torch.argmax(find_axis_dot_products_2)]
+
+        if torch.abs(dots_with_rel_vec[2]) > 0.01:
+            vector_to_use_3 = dot_vec
+            aligned_tensor[2] = True
+        else:
+            find_axis_dot_products_3 = torch.abs(torch.tensor([
+                torch.dot(ax_3, COM_a1),
+                torch.dot(ax_3, COM_a2),
+                torch.dot(ax_3, COM_a3),
+            ]))
+            vector_to_use_3 = COM_axes[torch.argmax(find_axis_dot_products_3)]
+
+        dot_products_1 = torch.tensor([
+            torch.dot(ax_1, vector_to_use_1),
+            torch.dot(-ax_1, vector_to_use_1),
+        ])
+        dot_products_2 = torch.tensor([
+            torch.dot(ax_2, vector_to_use_2),
+            torch.dot(-ax_2, vector_to_use_2),
+        ])
+        dot_products_3 = torch.tensor([
+            torch.dot(ax_3, vector_to_use_3),
+            torch.dot(-ax_3, vector_to_use_3),
+        ])
+
+        sorted_indices_1 = torch.argsort(dot_products_1, descending=True)
+        sorted_indices_2 = torch.argsort(dot_products_2, descending=True)
+        sorted_indices_3 = torch.argsort(dot_products_3, descending=True)
+
+        sa_aoi_1 = torch.stack([ax_1, -ax_1])[sorted_indices_1]
+        sa_aoi_2 = torch.stack([ax_2, -ax_2])[sorted_indices_2]
+        sa_aoi_3 = torch.stack([ax_3, -ax_3])[sorted_indices_3]
+        # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=COM.device).float() * 2 - 1)
+        # sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
+        sorted_axes_aoi = torch.stack([sa_aoi_1[0], # if aligned_tensor[0] else COM_a1,
+                                       sa_aoi_2[0], # if aligned_tensor[1] else COM_a2,
+                                       sa_aoi_3[0], # if aligned_tensor[2] else COM_a3
+                                        sa_aoi_3[1], # if aligned_tensor[2] else COM_a3,
+                                        sa_aoi_2[1], # if aligned_tensor[1] else COM_a2,
+                                        sa_aoi_1[1], # if aligned_tensor[0] else COM_a1
+                                      ]
+                                         )
+        return sorted_axes_aoi, aligned_tensor
+
     def canonicalize_aoi(self, centroid, positions, masses, ax_1, ax_2, ax_3, i):
         alignment_vec = torch.tensor([0, 0, 0], device=positions.device, dtype=torch.bool)
         centered_positions = positions - centroid
@@ -460,7 +562,6 @@ class MiaoNet(AtomicModule):
         indices = torch.tensor([j for j in range(n_atoms) if j != i], device=positions.device)
         local_COM = torch.sum(positions[indices] * masses[indices][:, None], axis=0) / torch.sum(masses[indices])
         COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
-        local_COM_rel_pos = local_COM - centroid
         dists = torch.linalg.norm(centered_positions[indices], dim=-1)
         nearest_neighbors = positions[indices][dists == dists.min()]
         if len(nearest_neighbors) > 1:
@@ -471,7 +572,8 @@ class MiaoNet(AtomicModule):
         nn_vec_rel_to_COM = nn_vec - COM
         nn_vec_rel_to_local_COM = nn_vec - local_COM
         COM_rel_pos = COM - centroid
-        vectors_to_dot = [COM_rel_pos]
+        local_COM_rel_pos = local_COM - centroid
+        vectors_to_dot = [COM_rel_pos, local_COM_rel_pos]
 
         deltas = []
         dp_vecs = []
@@ -485,7 +587,7 @@ class MiaoNet(AtomicModule):
         max_d_ind = torch.argmax(torch.tensor(deltas))
         dot_products_1 = dp_vecs[max_d_ind]
         sorted_indices_1 = torch.argsort(dot_products_1, descending=True)
-        if torch.tensor(deltas)[max_d_ind] > 0.1:
+        if torch.tensor(deltas)[max_d_ind] > 0.3:
             sa_aoi_1 = torch.stack([ax_1, -ax_1])[sorted_indices_1]
             alignment_vec[0] = True
         else:
@@ -573,6 +675,7 @@ class MiaoNet(AtomicModule):
         positions = batch_data['coordinate']
         masses = batch_data['atomic_number']
         n_atoms = positions.shape[0]
+        n_units = emb.shape[1]
         # Calculate the moment of inertia tensor
         I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
         dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
@@ -606,8 +709,23 @@ class MiaoNet(AtomicModule):
             for i in range(n_atoms):
                 for j in range(3):
                     if alignment_bool[i][j]:
-                        if f"ax_{j}" not in breakers:
-                            breakers[f"ax_{j+1}"] = prelim_all_axes[i][j]
+                        if breakers[f"ax_{j+1}"] is None:
+                            breakers[f"ax_{j+1}"] = prelim_all_axes[i][j].view(1, 3)
+                        else:
+                            breakers[f"ax_{j + 1}"] = torch.cat([breakers[f"ax_{j+1}"], prelim_all_axes[i][j].view(1, 3)], dim=0)
+        for key in breakers.keys():
+            if breakers[key] is not None:
+                if breakers[key].shape[0] > 1:
+                    rand_breaker = torch.randint(0, breakers[key].shape[0], (1,)).item()
+                    breakers[key] = breakers[key][rand_breaker]
+                else:
+                    breakers[key] = breakers[key][0]
+        nonbroken_dict = {'ax_1': None, 'ax_2': None, 'ax_3': None}
+        for i, b in enumerate(alignment_bool.t()):
+            if ~torch.any(b):
+                rand_atom_breaker = torch.randint(0, n_atoms, (1,)).item()
+                nonbroken_dict[f"ax_{i+1}"] = prelim_all_axes[rand_atom_breaker][i]
+
         for i in range(n_atoms):
             if not torch.all(alignment_bool[i]):
                 for j in range(3):
@@ -619,16 +737,19 @@ class MiaoNet(AtomicModule):
                             sorted_indices = torch.argsort(dot_with_breaker, descending=True)
                             all_axes[i][j] = to_align[sorted_indices][0]
                         elif breakers[f"ax_{j+1}"] is not None:
-                            dot_with_breaker = torch.tensor([torch.dot(ax, breakers[f"ax_{j+1}"]), torch.dot(-ax, breakers[f"ax_{j+1}"])])
+                            breaker_to_use = breakers[f"ax_{j + 1}"]
+                            dot_with_breaker = torch.tensor([torch.dot(ax, breaker_to_use), torch.dot(-ax, breaker_to_use)])
                             sorted_indices = torch.argsort(dot_with_breaker, descending=True)
                             all_axes[i][j] = to_align[sorted_indices][0]
                         else:
-                            all_axes[i][j] = ax
+                            all_axes[i][j] = nonbroken_dict[f"ax_{j+1}"]
                     else:
                         all_axes[i][j] = prelim_all_axes[i][j]
 
+        all_axes_full = self.init_aoi_linear(all_axes)
         for i in range(n_atoms):
             sorted_axes_aoi = all_axes[i]
-            decomposed_tensor = self.split_tensor(I[i], init_scalars[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+            decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             dec_tensors[i] = decomposed_tensor
-        return all_axes[:, :, :], dec_tensors
+        dec_tensors_full = self.init_tensors_linear(dec_tensors)
+        return all_axes_full, dec_tensors_full

@@ -205,9 +205,9 @@ class SelfInteractionLayer(nn.Module):
         self.mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
+                nn.BatchNorm1d(output_dim),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
             ) for way in range(max_way + 1)])
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
@@ -219,9 +219,9 @@ class SelfInteractionLayer(nn.Module):
                 weights = self.mlp_list[way](input_tensors[0])
                 for idx in range(way):
                     weights = weights.unsqueeze(-1)
-                input_tensor = torch.transpose(input_tensors[way], 1, -1)
+                input_tensor = torch.transpose(input_tensors[way]*weights, 1, -1)
                 output_tensor = linear(input_tensor)
-                output_tensors[way] = torch.transpose(output_tensor, 1, -1) * weights # (ELECTRA): THIS WEIGHTS HAS BEEN ADDED TO MAKE A NONLINEAR VERSION
+                output_tensors[way] = torch.transpose(output_tensor, 1, -1) # (ELECTRA): THIS WEIGHTS HAS BEEN ADDED TO MAKE A NONLINEAR VERSION
         return output_tensors
 
 
@@ -302,9 +302,9 @@ class MultiBodyLayer(nn.Module):
         self.weight_mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
+                nn.BatchNorm1d(output_dim),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
             ) for _ in range(max_way + 1)])
 
         n_body_tensors = [[1] *  (max_way + 1)]
@@ -381,10 +381,10 @@ class GraphConvLayer(nn.Module):
         ])
         self.rbf_node_mixing_list = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(output_dim * 3, output_dim*3, bias=True),
+                nn.Linear(output_dim * 2, output_dim*2, bias=True),
+                nn.BatchNorm1d(2*output_dim),
                 nn.Mish(),
-                nn.Linear(output_dim*3, output_dim, bias=True),
-                nn.Tanh()
+                nn.Linear(output_dim*2, output_dim, bias=True),
             )
             for r_way in range(max_r_way + 1)
         ])
@@ -427,7 +427,7 @@ class GraphConvLayer(nn.Module):
         # mol_id = ''.join(map(str, batch_data['atomic_number'].tolist()))
         for r_way, rbf_mixing in enumerate(self.rbf_mixing_list):
             fn = rbf_mixing(rbf_ij)
-            fn = self.rbf_node_mixing_list[r_way](torch.cat([fn, node_info[0][idx_i], node_info[0][idx_j]], dim=1))
+            fn = self.rbf_node_mixing_list[r_way](torch.cat([node_info[0][idx_i], node_info[0][idx_j]], dim=1))*fn
             y[r_way] = find_moment(batch_data, r_way).unsqueeze(1) * expand_to(fn, n_dim=r_way + 2)
         result = self.tensor_product(x, y)
         #plot_gaussian_arrows(batch_data['coordinate'][idx_i], result[1],f"AA_temp_pos_plots/tensor_product_{mol_id}.html")
@@ -479,3 +479,76 @@ class GraphNorm(nn.Module):
                 output_tensor = output_tensor + self.beta[None, :]
             output_tensors[way] = output_tensor
         return output_tensors
+
+
+class FixedLinearTransformVector(nn.Module):
+    def __init__(self, output_dim, freeze=True):
+        """
+        Custom linear layer with frozen weights.
+
+        Args:
+            output_dim (int): Number of output vectors (N).
+            freeze (bool): If True, the weights and biases are frozen.
+        """
+        super().__init__()
+
+        # Initialize weights for a 3x3 input transformation to output_dim vectors
+        self.weight = nn.Parameter(torch.randn(output_dim, 3), requires_grad=not freeze)
+
+        if freeze:
+            self.weight.requires_grad = False
+
+    def forward(self, x):
+        """
+        Forward pass for the fixed transformation.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, 3, 3).
+
+        Returns:
+            torch.Tensor: Transformed tensor of shape (batch_size, N, 3).
+        """
+        # Perform the transformation
+        # (batch_size, 3, 3) -> (batch_size, N, 3)
+        # Step 1: Transpose x to shape (batch_size, 3, 3) -> (batch_size, 3, 3)
+        x_transposed = x.transpose(1, 2)  # (batch_size, 3, 3)
+
+        # Step 2: Perform batched matrix multiplication
+        # (batch_size, 3, 3) @ (3, output_dim) -> (batch_size, 3, output_dim)
+        result = torch.matmul(x_transposed, self.weight.T)  # Transpose weight to (3, output_dim)
+
+        # Step 3: Transpose back to (batch_size, output_dim, 3)
+        return result.transpose(1, 2)
+
+class FixedLinearTransformTensor(nn.Module):
+    def __init__(self, input_dim, output_dim, freeze=True):
+        """
+        Custom linear layer for transforming Nx(input_dim)x3x3 tensors into Nx(output_dim)x3x3 tensors.
+
+        Args:
+            input_dim (int): Number of input tensors per sample (e.g., 5).
+            output_dim (int): Number of output tensors per sample.
+            freeze (bool): If True, the weights and biases are frozen.
+        """
+        super().__init__()
+
+        # Initialize weights for combining input_dim tensors into output_dim tensors
+        # Weight shape: (output_dim, input_dim)
+        self.weight = nn.Parameter(torch.randn(output_dim, input_dim), requires_grad=not freeze)
+
+        if freeze:
+            self.weight.requires_grad = False
+
+    def forward(self, x):
+        """
+        Forward pass for the fixed transformation.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (N, input_dim, 3, 3).
+
+        Returns:
+            torch.Tensor: Transformed tensor of shape (N, output_dim, 3, 3).
+        """
+        # Perform the transformation
+        # (N, input_dim, 3, 3) x (output_dim, input_dim) -> (N, output_dim, 3, 3)
+        return torch.einsum('nijm,oi->nojm', x, self.weight)

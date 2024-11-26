@@ -178,12 +178,13 @@ class MiaoMiaoNet(MiaoNet):
                  bilinear        : bool=False,
                  conv_mode       : Literal['node_j', 'node_edge']='node_j',
                  update_edge     : bool=False,
+                 prune    : bool=True,
                  ):
         self.max_n_body = max_n_body
         self.norm_heads = norm_heads
         self.norm_blocks = norm_blocks
         self.max_out_heads = max_out_heads
-        super().__init__(embedding_layer, radial_fn, n_layers, max_r_way, max_out_way, max_out_heads, output_dim, activate_fn, head_activate_list, mean, std, norm_factor, bilinear, conv_mode, update_edge)
+        super().__init__(embedding_layer, radial_fn, n_layers, max_r_way, max_out_way, max_out_heads, output_dim, activate_fn, head_activate_list, mean, std, norm_factor, bilinear, conv_mode, update_edge, prune)
 
     def get_eq_blocks(self, activate_fn, max_r_way, max_in_way, max_out_way,
             hidden_nodes, norm_factor, conv_mode, update_edge, n_layers):

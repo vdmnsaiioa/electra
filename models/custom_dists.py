@@ -205,7 +205,11 @@ class MixtureSameFamily(Distribution):
                 p = weighted
             return p
         else:
-            return torch.logsumexp(log_prob_x + log_mix_prob, dim=-1)  # [S, B]
+            if links is None:
+                return torch.logsumexp(log_prob_x + log_mix_prob, dim=-1)  # [S, B]
+            else:
+                p = segment_coo(torch.exp(log_prob_x) * torch.exp(log_mix_prob)[links[:, 1]], links[:, 0], reduce="sum")
+                return p
 
     def sample(self, sample_shape=torch.Size()):
         with torch.no_grad():
