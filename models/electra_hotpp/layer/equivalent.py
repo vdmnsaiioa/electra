@@ -205,7 +205,6 @@ class SelfInteractionLayer(nn.Module):
         self.mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.BatchNorm1d(output_dim),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
             ) for way in range(max_way + 1)])
@@ -302,7 +301,6 @@ class MultiBodyLayer(nn.Module):
         self.weight_mlp_list = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(input_dim, output_dim, bias=True),
-                nn.BatchNorm1d(output_dim),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
             ) for _ in range(max_way + 1)])
@@ -381,10 +379,9 @@ class GraphConvLayer(nn.Module):
         ])
         self.rbf_node_mixing_list = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(output_dim * 2, output_dim*2, bias=True),
-                nn.BatchNorm1d(2*output_dim),
+                nn.Linear(output_dim * 3, output_dim*3, bias=True),
                 nn.Mish(),
-                nn.Linear(output_dim*2, output_dim, bias=True),
+                nn.Linear(output_dim*3, output_dim, bias=True),
             )
             for r_way in range(max_r_way + 1)
         ])
@@ -427,7 +424,7 @@ class GraphConvLayer(nn.Module):
         # mol_id = ''.join(map(str, batch_data['atomic_number'].tolist()))
         for r_way, rbf_mixing in enumerate(self.rbf_mixing_list):
             fn = rbf_mixing(rbf_ij)
-            fn = self.rbf_node_mixing_list[r_way](torch.cat([node_info[0][idx_i], node_info[0][idx_j]], dim=1))*fn
+            fn = self.rbf_node_mixing_list[r_way](torch.cat([fn, node_info[0][idx_i], node_info[0][idx_j]], dim=1))
             y[r_way] = find_moment(batch_data, r_way).unsqueeze(1) * expand_to(fn, n_dim=r_way + 2)
         result = self.tensor_product(x, y)
         #plot_gaussian_arrows(batch_data['coordinate'][idx_i], result[1],f"AA_temp_pos_plots/tensor_product_{mol_id}.html")

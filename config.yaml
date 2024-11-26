@@ -1,5 +1,5 @@
 project_name: ELECTRA_UM
-eq_check: True
+eq_check: False
 wandb: False
 
 # New stuff
@@ -13,10 +13,10 @@ plot_gaus_pos: True
 
 ## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE:
 remove_vector_components: False
+## Right now, negative_contributions is just a nonlinear multiplier, and not a negative multiplier.
 negative_contributions: True # True ruins equivariance if the function is actually negative unfortunately - but we can semi-use a positive nonlinear activation and get decent equivariance
 prune: True
 ## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE
-
 use_pos_disp_functions: True
 
 model_type: hotpp
@@ -36,8 +36,8 @@ n_max: 3
 out_max: 3
 hotpp_cutoff: 6.0
 hotpp_nlayers: 6
-hotpp_outdim: 120
-master_units: 120
+hotpp_outdim: 90
+master_units: 90
 embed_type: aufbau
 precision: float
 
@@ -80,8 +80,8 @@ load_model_path: Null
 # TRAINING
 optimizer: adamw
 n_epochs: 1000
-initial_lr: 0.001
-final_lr: 0.001
+initial_lr: 0.0003
+final_lr: 0.0003
 n_warmups: 0
 clip_grad: False
 gradient_clip_value: 1.0

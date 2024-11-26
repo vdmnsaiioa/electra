@@ -118,12 +118,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         self.wsm_network = nn.Sequential(
             nn.Linear(4 * self.units, self.units * 3),
             nn.Mish(),
-            nn.Linear(self.units * 3, self.units * 2)
-        )
-        self.pos_factors_network = nn.Sequential(
-            nn.Linear(4 * self.units, self.units * 3),
-            nn.Mish(),
-            nn.Linear(self.units * 3, self.units * 3),
+            nn.Linear(self.units * 3, 5*self.units)
         )
         ## ATOMIC TRANSFORM
         self.matrix_factors_network = nn.Sequential(
@@ -221,16 +216,16 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         #pos_disp_3 = self.normalize_vector(pos_disp_3)
 
         wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal_2, X_tens_scal_2), dim=-1).view(n_atoms, -1)
-        pos_scalars = self.pos_factors_network(wsm_)
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
+        weights = wsm[:, :self.units]
+        wsm_sm = wsm[:, self.units:self.units * 2]
+        pos_factors = wsm[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
+        pos_factors_2 = wsm[:, self.units * 3:self.units * 4].reshape(n_atoms * self.units, 1)
+        pos_factors_3 = wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
 
-        weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
-        scal_mults_th = torch.sigmoid(wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units))
-
-        pos_factors = pos_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
-        pos_factors_2 = pos_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
-        pos_factors_3 = pos_scalars[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
+        weights_sm = torch.softmax(weights.reshape(n_atoms*self.units), dim=0)
+        scal_mults_th = torch.tanh(wsm_sm.reshape(n_atoms*self.units))
 
         mat_factors = matrix_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
         mat_factors_2 = matrix_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
@@ -246,7 +241,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         if self.config['use_pos_disp_functions']:
             pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*torch.square(pos_factors_2) + pos_disp_3 * pos_factors_3
         else:
-            pos_disp_final = pos_disp * pos_factors + pos_disp_2 * pos_factors_2 + pos_disp_3 * pos_factors_3
+            pos_disp_final = pos_disp + pos_disp_2 + pos_disp_3
         VMF_Vec = pos_disp_3 * pos_factors_3
 
         result = {"cov": cov_final,
@@ -1094,6 +1089,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         )
 
         # Determine colors based on sign of scal_mults
+        if scal_mults is None:
+            scal_mults = np.ones_like(weights)
         gaussian_colors = ['blue' if scal < 0 else 'red' for scal in scal_mults]
 
         # Gaussian hover text (position and origin info)

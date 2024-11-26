@@ -194,11 +194,13 @@ class MixtureSameFamily(Distribution):
                 weighted = torch.exp(log_prob_x) * self.scal_mults * torch.exp(log_mix_prob)
                 weighted = torch.sum(weighted, dim=-1)
             else:
-                mult = self.scal_mults * torch.exp(log_mix_prob)
+                lmp = log_mix_prob[links[:, 1]]
+                mult = self.scal_mults[links[:, 1]]
+                common_exp = log_prob_x + lmp
                 if self.use_vmf:
-                    weighted = segment_coo(torch.exp(log_prob_x)*torch.exp(log_prob_x_vmf)*mult[links[:, 1]], links[:, 0], reduce="sum")
+                    weighted = segment_coo(torch.exp(common_exp)*torch.exp(log_prob_x_vmf)*mult[links[:, 1]], links[:, 0], reduce="sum")
                 else:
-                    weighted = segment_coo(torch.exp(log_prob_x) * mult[links[:, 1]], links[:, 0], reduce="sum")
+                    weighted = segment_coo(torch.exp(common_exp) * mult[links[:, 1]], links[:, 0], reduce="sum")
             if self.relu:
                 p = torch.relu(weighted)  # [S, B]
             else:
@@ -208,7 +210,9 @@ class MixtureSameFamily(Distribution):
             if links is None:
                 return torch.logsumexp(log_prob_x + log_mix_prob, dim=-1)  # [S, B]
             else:
-                p = segment_coo(torch.exp(log_prob_x) * torch.exp(log_mix_prob)[links[:, 1]], links[:, 0], reduce="sum")
+                lmp = log_mix_prob[links[:, 1]]
+                common_exp = log_prob_x + lmp
+                p = segment_coo(torch.exp(common_exp), links[:, 0], reduce="sum")
                 return p
 
     def sample(self, sample_shape=torch.Size()):
@@ -510,11 +514,7 @@ class MultivariateNormal(Distribution):
             self._validate_sample(value)
         if links is None:
             diff = value - self.loc
-            if self.loc2 is not None:
-                diff2 = value - self.loc2
-            else:
-                diff2 = None
-            M = _batch_mahalanobis(self._unbroadcasted_scale_tril, diff, diff2)
+            M = _batch_mahalanobis(self._unbroadcasted_scale_tril, diff)
             half_log_det = (
                 self._unbroadcasted_scale_tril.diagonal(dim1=-2, dim2=-1).log().sum(-1)
             )
