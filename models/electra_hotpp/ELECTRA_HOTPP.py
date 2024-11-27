@@ -225,7 +225,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         pos_factors_3 = wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
 
         weights_sm = torch.softmax(weights.reshape(n_atoms*self.units), dim=0)
-        scal_mults_th = torch.tanh(wsm_sm.reshape(n_atoms*self.units))
+        scal_mults_th = wsm_sm.reshape(n_atoms*self.units)
 
         mat_factors = matrix_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
         mat_factors_2 = matrix_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)

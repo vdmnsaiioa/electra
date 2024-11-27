@@ -284,14 +284,14 @@ class MiaoNet(AtomicModule):
             mean_vec_weights = self.mean_vec_mlps_heads[i](input_vec)
             split_tensor_weights = self.split_tensor_weights_heads[i](input_vec)
         vectors_to_subtract_l1 = norm_parallel_components * mean_vec_weights[:, 0:n_units].unsqueeze(-1)
-        pruned_vectors = ni_dict[1] - vectors_to_subtract_l1
+        pruned_vectors = norm_node_vectors - vectors_to_subtract_l1
         pruned_vectors = self.normalize_vector(pruned_vectors)
         ni_dict[1] = pruned_vectors
         if block:
             ni_dict[0] = self.l0_nets_blocks[i](input_vec)
         else:
             ni_dict[0] = self.l0_nets_heads[i](input_vec)
-        ni_dict[2] = self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), split_tensor_weights)
+        ni_dict[2] = self.normalize_matrix(self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), split_tensor_weights))
         return ni_dict
 
     def get_init_info(self,
@@ -334,6 +334,9 @@ class MiaoNet(AtomicModule):
 
         # Step 2: Eigen-decomposition of the covariance matrix to find the principal axis for each set
         # Compute eigenvalues and eigenvectors for each 3x3 covariance matrix
+        cov_matrix = (cov_matrix + cov_matrix.transpose(-1, -2)) / 2
+        eps = 1e-6
+        cov_matrix += torch.eye(3, device=cov_matrix.device) * eps
         eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)  # eigenvalues, eigenvectors shapes: (N, 3), (N, 3, 3)
         eigenvectors = eigenvectors.detach()
 
@@ -552,7 +555,7 @@ class MiaoNet(AtomicModule):
         # sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
         sorted_axes_aoi = torch.stack([sa_aoi_1[0], # if aligned_tensor[0] else COM_a1,
                                        sa_aoi_2[0], # if aligned_tensor[1] else COM_a2,
-                                       sa_aoi_3[0], # if aligned_tensor[2] else COM_a3
+                                       sa_aoi_3[0], # if aligned_tensor[2] else COM_a3,
                                         sa_aoi_3[1], # if aligned_tensor[2] else COM_a3,
                                         sa_aoi_2[1], # if aligned_tensor[1] else COM_a2,
                                         sa_aoi_1[1], # if aligned_tensor[0] else COM_a1

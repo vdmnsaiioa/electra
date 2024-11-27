@@ -32,7 +32,7 @@ def run():
     acc = "auto" if torch.cuda.is_available() else "cpu"
     strategy = "fsdp" if torch.cuda.is_available() else "auto"
     if config['data_split'] == 'test':
-        max_time = "0:08:30:00"
+        max_time = "0:02:30:00"
     else:
         max_time = "6:16:00:00"
 
