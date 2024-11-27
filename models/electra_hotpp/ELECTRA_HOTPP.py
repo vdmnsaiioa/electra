@@ -225,7 +225,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         pos_factors_3 = wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
 
         weights_sm = torch.softmax(weights.reshape(n_atoms*self.units), dim=0)
-        scal_mults_th = wsm_sm.reshape(n_atoms*self.units)
+
+        # Whether we put Tanh here or not is a big question. Tanh seems best for now.
+        scal_mults_th = torch.tanh(wsm_sm.reshape(n_atoms*self.units))
 
         mat_factors = matrix_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
         mat_factors_2 = matrix_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
@@ -399,9 +401,9 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         )
         end = time.process_time()
         if self.config['wandb']:
-            wandb.log({"Full Inference Time": end - start})
+            wandb.log({"Full Inference Time TRAIN": end - start})
         else:
-            print("Full Inference Time: ", end - start)
+            print("Full Inference Time TRAIN: ", end - start)
 
         self.log("Train Density Err %",
                  np.round(100 * dens_error.detach().cpu().numpy(), 2),
@@ -419,6 +421,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
     def validation_step(self,
                         batch,
                         batch_idx: int):
+        start = time.process_time()
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
@@ -490,6 +493,11 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             sampled_points=sampled_points,
             training=False
         )
+        end = time.process_time()
+        if self.config['wandb']:
+            wandb.log({"Full Inference Time VAL": end - start})
+        else:
+            print("Full Inference Time VAL:", end - start)
 
         self.log("Validation Density Err %",
                  np.round(100 * density_error.detach().cpu().numpy(), 2),
@@ -633,6 +641,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
     def test_step(self,
                         batch,
                         batch_idx: int):
+        start = time.process_time()
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
@@ -675,17 +684,24 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
             use_links=self.config['use_links'],
             device=self.device)
 
-        if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
-            density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                           pos_grid=pos_grid,
-                                           gaus_pos=gaus_pos,
-                                           n_multiples=result['n_multiples'],
-                                           n_points=self.config['n_split_points'],
-                                           sample_all=True)
-        else:
+        try:
             density = get_full_grid_dens(atom_dist=sys_dist,
-                                         n_multiples=result['n_multiples'],
-                                         pos_grid=pos_grid)
+                                             n_multiples=result['n_multiples'],
+                                             pos_grid=pos_grid)
+            end = time.process_time()
+            if self.config['wandb']:
+                wandb.log({"Full Inference Time TEST": end - start})
+            else:
+                print("Full Inference Time TEST: ", end - start)
+        except RuntimeError as e:
+            if 'CUDA out of memory' in str(e):
+                # Fallback to the other branch if a memory error occurs
+                density, _ = get_n_points_dens(atom_dist=sys_dist,
+                                               pos_grid=pos_grid,
+                                               gaus_pos=gaus_pos,
+                                               n_multiples=result['n_multiples'],
+                                               n_points=self.config['n_split_points'],
+                                               sample_all=True)
         sampled_points = None
 
         density, n_val_elec = normalize_density(n_elec=qm9_n_elec,

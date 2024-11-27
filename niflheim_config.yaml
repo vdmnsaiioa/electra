@@ -1,6 +1,6 @@
 project_name: ELECTRA_NEW
 eq_check: False
-wandb: True
+wandb: False
 
 # New stuff
 inference_cutoff: 3.5
@@ -10,7 +10,13 @@ weigh_com_by_mass: False
 activation_type: silu
 use_sh: False
 plot_gaus_pos: True
-remove_vector_components: True
+
+## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE (at the 1e-3 level)
+remove_vector_components: False
+## Right now, negative_contributions is just a nonlinear multiplier, and not a negative multiplier.
+negative_contributions: True
+prune: True
+## THESE ARE MOST IMPORTANT FOR EQUIVARIANCE
 use_pos_disp_functions: True
 
 model_type: hotpp
@@ -20,42 +26,40 @@ head_activate_list: ['silu', 'silu', 'silu']
 #hotpp params
 use_vmf: False
 gaus_per_electrons: 50
-norm_heads: ['none', 'none', 'none']
+#norm_heads: ['none', 'none', 'none']
 norm_blocks: 'none'
 conv_mode: node_j
 update_edge: False
-#norm_heads: ['graph', 'graph', 'graph']
-use_final_fctp: True
+norm_heads: ['graph', 'graph', 'graph']
 r_max: 3
 n_max: 3
 out_max: 3
 hotpp_cutoff: 6.0
 hotpp_nlayers: 6
-hotpp_outdim: 500
-use_graph_directly: True
-master_units: 500
+hotpp_outdim: 450
+master_units: 450
 embed_type: aufbau
+precision: float
 
 # MODEL PARAMS
-negative_contributions: True
-loss_type: "huber"
+loss_type: "normal"
 loss_coef: 100
 huber_loss_threshold: 0.1
 reduce_weight_by: 4
 relu: False
 
 weight_decay: 0.000
-data_split: "15000"
+data_split: "60000"
 lr_dec_every: 1
-lr_gamma: 0.97
+lr_gamma: 0.75
 
 seed: 505
 n_train_points: 100000
-n_split_points: 35000
+n_split_points: 50000
 train_sample_all: True
 train_set_perc: 0.9
 n_files: 1500
-max_grid_points: 50000
+max_grid_points: 100000
 
 niflheim: True
 

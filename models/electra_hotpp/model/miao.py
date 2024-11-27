@@ -272,6 +272,7 @@ class MiaoNet(AtomicModule):
         parallel_components = self.extract_parallel_components(ni_dict[1], ev_num=-1)
         norms_pc = torch.linalg.norm(parallel_components, dim=-1)
         norm_parallel_components = self.extract_parallel_components(norm_node_vectors, ev_num=-1)
+        # Makes sense to normalize here to ensure a bit more smoothness (these can be small sometimes and we are mostly interested in the direction)
         dp_pc_nnv = torch.sum(norm_parallel_components * norm_node_vectors, dim=-1)
         dp_pc_rp = torch.sum(norm_parallel_components * norm_rel_pos, dim=-1)
         dp_rp_nv = torch.sum(norm_rel_pos * norm_node_vectors, dim=-1)
@@ -291,7 +292,7 @@ class MiaoNet(AtomicModule):
             ni_dict[0] = self.l0_nets_blocks[i](input_vec)
         else:
             ni_dict[0] = self.l0_nets_heads[i](input_vec)
-        ni_dict[2] = self.normalize_matrix(self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), split_tensor_weights))
+        ni_dict[2] = self.split_batch_tensor(self.normalize_matrix(ni_dict[2]), split_tensor_weights)
         return ni_dict
 
     def get_init_info(self,
