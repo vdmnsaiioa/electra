@@ -495,7 +495,8 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         )
         end = time.process_time()
         if self.config['wandb']:
-            wandb.log({"Full Inference Time VAL": end - start})
+            if wandb.run is not None:
+                wandb.log({"Full Inference Time VAL": end - start})
         else:
             print("Full Inference Time VAL:", end - start)
 

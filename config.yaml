@@ -25,7 +25,7 @@ max_out_heads: [3,3,3] # scal, vec, tens
 head_activate_list: ['silu', 'silu', 'silu']
 #hotpp params
 use_vmf: False
-gaus_per_electrons: 15
+gaus_per_electrons: 11
 #norm_heads: ['none', 'none', 'none']
 norm_blocks: 'none'
 conv_mode: node_j
@@ -36,8 +36,8 @@ n_max: 3
 out_max: 3
 hotpp_cutoff: 6.0
 hotpp_nlayers: 6
-hotpp_outdim: 145
-master_units: 145
+hotpp_outdim: 99
+master_units: 99
 embed_type: aufbau
 precision: float
 

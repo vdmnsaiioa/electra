@@ -216,8 +216,12 @@ class MiaoNet(AtomicModule):
             nn.Mish(),
             nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
         ) for _ in range(3)])
-        self.init_aoi_linear = FixedLinearTransformVector(output_dim=hidden_nodes[0], freeze=True)
-        self.init_tensors_linear = FixedLinearTransformTensor(input_dim=5, output_dim=hidden_nodes[0], freeze=True)
+        self.units = hidden_nodes[0]
+        possible_alignments = ['000', '001', '010', '011', '100', '101', '110', '111']
+        self.init_aoi_linears = nn.ModuleDict({alignment: FixedLinearTransformVector(output_dim=self.units, freeze=False) for alignment in possible_alignments})
+        self.init_tensors_linears = nn.ModuleDict({alignment: FixedLinearTransformTensor(input_dim=5, output_dim=self.units, freeze=False) for alignment in possible_alignments})
+        for alignment in possible_alignments:
+            self.register_buffer(f"align_{alignment}", torch.tensor([int(x) for x in alignment]))
 
     def calculate(self,
                   batch_data : Dict[str, torch.Tensor]
@@ -456,10 +460,16 @@ class MiaoNet(AtomicModule):
             dec_tensors[i] = decomposed_tensor
             all_align_tensors[i] = aligned_tensor
         n_vecs = 3
-        all_axes_full = self.init_aoi_linear(all_axes[:, :n_vecs, :])
-        dec_tensors_full = self.init_tensors_linear(dec_tensors)
+        final_axes = torch.zeros((n_atoms, self.units, 3), device=positions.device, dtype=positions.dtype)
+        dec_tensors_full = torch.zeros((n_atoms, self.units, 3, 3), device=positions.device, dtype=positions.dtype)
+        for n, ax in enumerate(all_axes[:, :n_vecs, :]):
+            syms = ''.join(str(int(x)) for x in all_align_tensors[n].tolist())
+            ax_transform = self.init_aoi_linears[syms](ax.view(1, 3, 3))
+            dec_tensor = self.init_tensors_linears[syms](dec_tensors[n].view(1, 5, 3, 3))
+            final_axes[n] = ax_transform
+            dec_tensors_full[n] = dec_tensor
         symmetry_dict = {"axes_symmetries": all_align_tensors, "COM_axes": COM_axes_default}
-        return all_axes_full, dec_tensors_full, symmetry_dict
+        return final_axes, dec_tensors_full, symmetry_dict
         #return all_axes[:, :n_vecs, :], dec_tensors
 
     def canonicalize_aoi_simple(self, vector_to_dot, ax_1, ax_2, ax_3):
