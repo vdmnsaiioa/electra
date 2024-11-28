@@ -207,7 +207,6 @@ class SelfInteractionLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
             ) for way in range(max_way + 1)])
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
@@ -304,7 +303,6 @@ class MultiBodyLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
             ) for _ in range(max_way + 1)])
 
         n_body_tensors = [[1] *  (max_way + 1)]
@@ -384,7 +382,6 @@ class GraphConvLayer(nn.Module):
                 nn.Linear(output_dim * 3, output_dim*3, bias=True),
                 nn.Mish(),
                 nn.Linear(output_dim*3, output_dim, bias=True),
-                nn.Tanh()
             )
             for r_way in range(max_r_way + 1)
         ])

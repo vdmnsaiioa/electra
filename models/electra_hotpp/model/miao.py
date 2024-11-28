@@ -217,11 +217,8 @@ class MiaoNet(AtomicModule):
             nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
         ) for _ in range(3)])
         self.units = hidden_nodes[0]
-        possible_alignments = ['000', '001', '010', '011', '100', '101', '110', '111']
-        self.init_aoi_linears = nn.ModuleDict({alignment: FixedLinearTransformVector(output_dim=self.units, freeze=False) for alignment in possible_alignments})
-        self.init_tensors_linears = nn.ModuleDict({alignment: FixedLinearTransformTensor(input_dim=5, output_dim=self.units, freeze=False) for alignment in possible_alignments})
-        for alignment in possible_alignments:
-            self.register_buffer(f"align_{alignment}", torch.tensor([int(x) for x in alignment]))
+        self.init_aoi_linear = FixedLinearTransformVector(output_dim=self.units, freeze=True)
+        self.init_tensors_linear = FixedLinearTransformTensor(input_dim=5, output_dim=self.units, freeze=True)
 
     def calculate(self,
                   batch_data : Dict[str, torch.Tensor]
@@ -455,22 +452,19 @@ class MiaoNet(AtomicModule):
             ax_3 = axes_of_inertia[:, 2]  # Third principal axis
             #sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
             sorted_axes_aoi, aligned_tensor = self.canonicalize_aoi_COM_aoi(COM_axes, ax_1, ax_2, ax_3, centroid, COM)
+            sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
             decomposed_tensor = self.split_tensor(self.normalize_matrix(I[i]), sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             all_axes[i] = sorted_axes_aoi
             dec_tensors[i] = decomposed_tensor
             all_align_tensors[i] = aligned_tensor
         n_vecs = 3
-        final_axes = torch.zeros((n_atoms, self.units, 3), device=positions.device, dtype=positions.dtype)
-        dec_tensors_full = torch.zeros((n_atoms, self.units, 3, 3), device=positions.device, dtype=positions.dtype)
-        for n, ax in enumerate(all_axes[:, :n_vecs, :]):
-            syms = ''.join(str(int(x)) for x in all_align_tensors[n].tolist())
-            ax_transform = self.init_aoi_linears[syms](ax.view(1, 3, 3))
-            dec_tensor = self.init_tensors_linears[syms](dec_tensors[n].view(1, 5, 3, 3))
-            final_axes[n] = ax_transform
-            dec_tensors_full[n] = dec_tensor
+        all_axes = all_axes[:, :n_vecs, :]
+        # Compute absolute values for comparison
+        final_axes = self.init_aoi_linear(all_axes)
+        dec_tensors_full = self.init_tensors_linear(dec_tensors)
         symmetry_dict = {"axes_symmetries": all_align_tensors, "COM_axes": COM_axes_default}
         return final_axes, dec_tensors_full, symmetry_dict
-        #return all_axes[:, :n_vecs, :], dec_tensors
+        #return all_axes[:, :n_vecs, :], dec_tensors, symmetry_dict
 
     def canonicalize_aoi_simple(self, vector_to_dot, ax_1, ax_2, ax_3):
         dot_products_1 = torch.tensor([
@@ -503,13 +497,13 @@ class MiaoNet(AtomicModule):
         COM_a2 = COM_axes[1]
         COM_a3 = COM_axes[2]
         aligned_tensor = torch.tensor([0, 0, 0], device=COM.device, dtype=torch.bool)
-        dot_vec = COM-centroid
+        dot_vec = COM
         dots_with_rel_vec = torch.tensor([
             torch.dot(ax_1, dot_vec),
             torch.dot(ax_2, dot_vec),
             torch.dot(ax_3, dot_vec),
         ])
-        if torch.abs(dots_with_rel_vec[0]) > 0.01:
+        if torch.abs(dots_with_rel_vec[0]) > 100000:
             vector_to_use_1 = dot_vec
             aligned_tensor[0] = True
         else:
@@ -520,7 +514,7 @@ class MiaoNet(AtomicModule):
             ]))
             vector_to_use_1 = COM_axes[torch.argmax(find_axis_dot_products_1)]
 
-        if torch.abs(dots_with_rel_vec[1]) > 0.01:
+        if torch.abs(dots_with_rel_vec[1]) > 100000:
             vector_to_use_2 = dot_vec
             aligned_tensor[1] = True
         else:
@@ -531,7 +525,7 @@ class MiaoNet(AtomicModule):
             ]))
             vector_to_use_2 = COM_axes[torch.argmax(find_axis_dot_products_2)]
 
-        if torch.abs(dots_with_rel_vec[2]) > 0.01:
+        if torch.abs(dots_with_rel_vec[2]) > 100000:
             vector_to_use_3 = dot_vec
             aligned_tensor[2] = True
         else:
