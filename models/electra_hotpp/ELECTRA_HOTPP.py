@@ -118,7 +118,12 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         self.wsm_network = nn.Sequential(
             nn.Linear(4 * self.units, self.units * 3),
             nn.Mish(),
-            nn.Linear(self.units * 3, 5*self.units)
+            nn.Linear(self.units * 3, 2*self.units)
+        )
+        self.pos_factors_network = nn.Sequential(
+            nn.Linear(4 * self.units, self.units * 3),
+            nn.Mish(),
+            nn.Linear(self.units * 3, self.units * 3),
         )
         ## ATOMIC TRANSFORM
         self.matrix_factors_network = nn.Sequential(
@@ -211,23 +216,21 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
         pos_disp_2 = X_scal_vec.view(-1, 3)
         pos_disp_3 = X_tens_vec.view(-1, 3)
 
-        #pos_disp = self.normalize_vector(pos_disp)
-        #pos_disp_2 = self.normalize_vector(pos_disp_2)
-        #pos_disp_3 = self.normalize_vector(pos_disp_3)
+        # pos_disp = self.normalize_vector(pos_disp)
+        # pos_disp_2 = self.normalize_vector(pos_disp_2)
+        # pos_disp_3 = self.normalize_vector(pos_disp_3)
 
         wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal_2, X_tens_scal_2), dim=-1).view(n_atoms, -1)
+        pos_scalars = self.pos_factors_network(wsm_)
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
-        weights = wsm[:, :self.units]
-        wsm_sm = wsm[:, self.units:self.units * 2]
-        pos_factors = wsm[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
-        pos_factors_2 = wsm[:, self.units * 3:self.units * 4].reshape(n_atoms * self.units, 1)
-        pos_factors_3 = wsm[:, self.units * 4:self.units * 5].reshape(n_atoms * self.units, 1)
 
-        weights_sm = torch.softmax(weights.reshape(n_atoms*self.units), dim=0)
+        weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
+        scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
 
-        # Whether we put Tanh here or not is a big question. Tanh seems best for now.
-        scal_mults_th = torch.tanh(wsm_sm.reshape(n_atoms*self.units))
+        pos_factors = pos_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
+        pos_factors_2 = pos_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
+        pos_factors_3 = pos_scalars[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
 
         mat_factors = matrix_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
         mat_factors_2 = matrix_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
@@ -235,7 +238,7 @@ class ELECTRA_hotpp(L.LightningModule, IOMixIn):
 
         scaling_factors = torch.softmax(torch.cat([mat_factors, mat_factors_2, mat_factors_3], dim=-1), dim=-1)
         S1, S2, S3 = scaling_factors[:, 0][:, None, None], scaling_factors[:, 1][:, None, None], scaling_factors[:, 2][:, None, None]
-        X_tens = S1*self.symm_tensor(X_tens).view(-1, 3, 3) + S2*self.symm_tensor(X_vec_tens).view(-1, 3, 3) + S3*self.symm_tensor(X_scal_tens).view(-1, 3, 3)
+        X_tens = S1 * self.symm_tensor(X_tens).view(-1, 3, 3) + S2 * self.symm_tensor(X_vec_tens).view(-1, 3,3) + S3 * self.symm_tensor(X_scal_tens).view(-1, 3, 3)
 
         cov_final = X_tens.view(-1, 3, 3)
         cov_final = self.construct_pos_def(cov_final)

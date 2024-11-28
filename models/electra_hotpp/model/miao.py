@@ -207,14 +207,14 @@ class MiaoNet(AtomicModule):
             nn.Sigmoid()
         ) for _ in range(3)])
         self.l0_nets_blocks = nn.ModuleList([nn.Sequential(
-            nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
+            nn.Linear(7 * hidden_nodes[0], 3*hidden_nodes[0]),
             nn.Mish(),
-            nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
+            nn.Linear(3*hidden_nodes[0], hidden_nodes[0]),
         ) for _ in range(n_layers - 3)])
         self.l0_nets_heads = nn.ModuleList([nn.Sequential(
-            nn.Linear(7 * hidden_nodes[0], 7*hidden_nodes[0]),
+            nn.Linear(7 * hidden_nodes[0], 3*hidden_nodes[0]),
             nn.Mish(),
-            nn.Linear(7*hidden_nodes[0], hidden_nodes[0]),
+            nn.Linear(3*hidden_nodes[0], hidden_nodes[0]),
         ) for _ in range(3)])
         self.units = hidden_nodes[0]
         self.init_aoi_linear = FixedLinearTransformVector(output_dim=self.units, freeze=True)
@@ -336,9 +336,6 @@ class MiaoNet(AtomicModule):
 
         # Step 2: Eigen-decomposition of the covariance matrix to find the principal axis for each set
         # Compute eigenvalues and eigenvectors for each 3x3 covariance matrix
-        cov_matrix = (cov_matrix + cov_matrix.transpose(-1, -2)) / 2
-        eps = 1e-6
-        cov_matrix += torch.eye(3, device=cov_matrix.device) * eps
         eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)  # eigenvalues, eigenvectors shapes: (N, 3), (N, 3, 3)
         eigenvectors = eigenvectors.detach()
 
@@ -436,13 +433,10 @@ class MiaoNet(AtomicModule):
         I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
         dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
         all_axes = torch.zeros((n_atoms, 6, 3), device=positions.device, dtype=positions.dtype)
-        all_align_tensors = torch.zeros((n_atoms, 3), device=positions.device, dtype=positions.dtype)
-        COM_axes_default, _ = self.get_axes_of_inertia(batch_data, None)
-        COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
         for i in range(n_atoms):
             centroid = positions[i]
             centered_positions = positions - centroid
-            COM_axes, COM_dec_tensor = self.get_axes_of_inertia(batch_data, centroid)
+            COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
 
             for j in range(n_atoms):
                 I[i] += (torch.eye(3, device=positions.device, dtype=positions.dtype) * torch.linalg.norm(centered_positions[j]) ** 2 - torch.outer(centered_positions[j], centered_positions[j])) * masses[j]
@@ -450,21 +444,15 @@ class MiaoNet(AtomicModule):
             ax_1 = axes_of_inertia[:, 0]  # First principal axis
             ax_2 = axes_of_inertia[:, 1]  # Second principal axis
             ax_3 = axes_of_inertia[:, 2]  # Third principal axis
-            #sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
-            sorted_axes_aoi, aligned_tensor = self.canonicalize_aoi_COM_aoi(COM_axes, ax_1, ax_2, ax_3, centroid, COM)
             sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
-            decomposed_tensor = self.split_tensor(self.normalize_matrix(I[i]), sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+            # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
+            decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
             all_axes[i] = sorted_axes_aoi
             dec_tensors[i] = decomposed_tensor
-            all_align_tensors[i] = aligned_tensor
         n_vecs = 3
-        all_axes = all_axes[:, :n_vecs, :]
-        # Compute absolute values for comparison
-        final_axes = self.init_aoi_linear(all_axes)
+        all_axes_full = self.init_aoi_linear(all_axes[:, :n_vecs, :])
         dec_tensors_full = self.init_tensors_linear(dec_tensors)
-        symmetry_dict = {"axes_symmetries": all_align_tensors, "COM_axes": COM_axes_default}
-        return final_axes, dec_tensors_full, symmetry_dict
-        #return all_axes[:, :n_vecs, :], dec_tensors, symmetry_dict
+        return all_axes_full, dec_tensors_full, None
 
     def canonicalize_aoi_simple(self, vector_to_dot, ax_1, ax_2, ax_3):
         dot_products_1 = torch.tensor([
