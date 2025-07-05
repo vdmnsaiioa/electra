@@ -181,7 +181,6 @@ class MiaoNet(AtomicModule):
         self.radial_fn = radial_fn
         self.max_out_heads = max_out_heads
         self.prune = prune
-        self.alpha = nn.Parameter(torch.tensor(0.1))
 
         max_in_way = [1] + max_out_way[:-1]
         hidden_nodes = [embedding_layer.n_channel] + output_dim
@@ -264,6 +263,9 @@ class MiaoNet(AtomicModule):
         if self.prune:
             node_info_3 = self.prune_nodes(node_info_3, 2, n_units, batch_data, block=False)
         #plot_gaussian_arrows(batch_data['coordinate'], node_info_3[1], f"/home/energy/jels/gaussian_arrows_trained/tensor_head_{mol_ID}.html")
+        node_info_1[1] = node_info_1[1]
+        node_info_2[1] = node_info_2[1]
+        node_info_3[1] = node_info_3[1]
         return node_info_1, node_info_2, node_info_3, init_embed
 
     #@compile_with_dynamic_shapes
@@ -310,22 +312,25 @@ class MiaoNet(AtomicModule):
         emb = self.embedding_layer(batch_data=batch_data)
 
         sb_axes, l2_tensor, symmetries = self.get_individual_axes_of_inertia(batch_data, emb)
+        #sb_axes, l2_tensor = self.get_individual_axes_of_inertia_alt(batch_data, emb)
         n_ax_oi = sb_axes.shape[1]
+
         n_atoms, emb_dim = emb.shape
+
         n_tensors = l2_tensor.shape[1]
+
         emb_l1 = torch.zeros(n_atoms, emb_dim, 3, device=emb.device, dtype=emb.dtype)
         emb_l2 = torch.zeros(n_atoms, emb_dim, 3, 3, device=emb.device, dtype=emb.dtype)
-        if batch_data["offset"].sum() != 0:
-            cell_vectors = batch_data['cell'].view(1, 3, 3)
-            cell_vectors = cell_vectors.repeat(n_atoms, 1, 1)
-            emb_l1[:, :n_ax_oi, :] = cell_vectors / torch.norm(cell_vectors, dim=-1, keepdim=True)
-            emb_l1[:, n_ax_oi:n_ax_oi +3, :] = sb_axes
-            emb_l2[:, :n_tensors, :, :] = l2_tensor
-        else:
-            emb_l1[:, :n_ax_oi, :] = sb_axes
-            emb_l2[:, :n_tensors, :, :] = l2_tensor
+        #sb_axes_extended = sb_axes.unsqueeze(0).expand(n_atoms, -1, -1)
+        #l2_tensor = l2_tensor.unsqueeze(0).expand(n_atoms, -1, -1, -1)
+        emb_l1[:, :n_ax_oi, :] = sb_axes
+        emb_l2[:, :n_tensors, :, :] = l2_tensor
+        #cell_vectors = batch_data['cell'].view(1, 3, 3)
+        #cell_vectors = cell_vectors.repeat(n_atoms, 1, 1)
+        #emb_l1[:, n_ax_oi:3+n_ax_oi, :] = cell_vectors / torch.norm(cell_vectors, dim=-1, keepdim=True)
 
         node_info = {0: emb, 1: emb_l1, 2: emb_l2}
+        #node_info = {0: emb}
         _, dij, _ = find_distances(batch_data)
         rbf = self.radial_fn(dij)
         edge_info = {0: rbf}
@@ -387,6 +392,124 @@ class MiaoNet(AtomicModule):
                       conv_mode=conv_mode,
                       update_edge=update_edge,
                       ) for i in range(3)])
+    def get_axes_of_inertia(self, batch_data, centroid):
+        positions = batch_data['coordinate']
+        masses = batch_data['atomic_number']
+        COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
+
+        # Center the positions
+        centered_positions = positions - COM
+
+        # Calculate the moment of inertia tensor
+        I = torch.zeros((3, 3), device=positions.device)
+        for i in range(len(masses)):
+            I += (torch.eye(3, device=positions.device) * torch.linalg.norm(centered_positions[i]) ** 2 - torch.outer(
+                centered_positions[i], centered_positions[i])) * masses[i]
+
+        eigenvalues, axes_of_inertia = torch.linalg.eigh(I)
+        ax_1 = axes_of_inertia[:, 0]  # First principal axis
+        ax_2 = axes_of_inertia[:, 1]  # Second principal axis
+        ax_3 = axes_of_inertia[:, 2]  # Third principal axis
+        if centroid is not None:
+            vector_to_dot = COM - centroid
+            dot_products_1 = torch.tensor([
+                torch.dot(ax_1, vector_to_dot),
+                torch.dot(-ax_1, vector_to_dot),
+            ])
+            dot_products_2 = torch.tensor([
+                torch.dot(ax_2, vector_to_dot),
+                torch.dot(-ax_2, vector_to_dot),
+            ])
+            dot_products_3 = torch.tensor([
+                torch.dot(ax_3, vector_to_dot),
+                torch.dot(-ax_3, vector_to_dot),
+            ])
+            sorted_indices_1 = torch.argsort(dot_products_1, descending=True)
+            sorted_indices_2 = torch.argsort(dot_products_2, descending=True)
+            sorted_indices_3 = torch.argsort(dot_products_3, descending=True)
+
+            sa_aoi_1 = torch.stack([ax_1, -ax_1])[sorted_indices_1]
+            sa_aoi_2 = torch.stack([ax_2, -ax_2])[sorted_indices_2]
+            sa_aoi_3 = torch.stack([ax_3, -ax_3])[sorted_indices_3]
+
+            sorted_axes_aoi = torch.stack([sa_aoi_1[0], sa_aoi_2[0], sa_aoi_3[0], sa_aoi_3[1], sa_aoi_2[1], sa_aoi_1[1]])
+        else:
+            sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
+        n_vecs = 3
+        I = I / torch.linalg.norm(I)
+        decomposed_tensor = self.split_tensor(I,  sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+        return sorted_axes_aoi[:n_vecs] , decomposed_tensor
+
+    def get_individual_axes_of_inertia_nonopt(self, batch_data, emb):
+        positions = batch_data['coordinate']
+        masses = batch_data['atomic_number'].clone().detach()
+        n_atoms = positions.shape[0]
+        # Calculate the moment of inertia tensor
+        I = torch.zeros((n_atoms, 3, 3), device=positions.device, dtype=positions.dtype)
+        dec_tensors = torch.zeros((n_atoms, 5, 3, 3), device=positions.device, dtype=positions.dtype)
+        all_axes = torch.zeros((n_atoms, 6, 3), device=positions.device, dtype=positions.dtype)
+        for i in range(n_atoms):
+            centroid = positions[i]
+            centered_positions = positions - centroid
+            COM = torch.sum(positions * masses[:, None], axis=0) / torch.sum(masses)
+            if (batch_data["offset"] != 0).sum() != 0:
+                # Assume cell is a (3,3) matrix from batch_data["cell"]
+                cell = batch_data["cell"].view(3, 3)
+                cell_inv = torch.inverse(cell)
+
+                # centered_positions is already defined as positions - centroid (shape: [n_atoms, 3])
+                # Convert to fractional coordinates
+                fractional = torch.matmul(centered_positions, cell_inv.T)
+
+                # Wrap the fractional coordinates into the [-0.5, 0.5] interval
+                fractional_wrapped = fractional - torch.round(fractional)
+
+                # Convert back to Cartesian coordinates
+                centered_positions = torch.matmul(fractional_wrapped, cell.T)
+
+            for j in range(n_atoms):
+                I[i] += (torch.eye(3, device=positions.device, dtype=positions.dtype) * torch.linalg.norm(centered_positions[j]) ** 2 - torch.outer(centered_positions[j], centered_positions[j])) * masses[j]
+            eigenvalues, axes_of_inertia = torch.linalg.eigh(I[i])
+            ax_1 = axes_of_inertia[:, 0]  # First principal axis
+            ax_2 = axes_of_inertia[:, 1]  # Second principal axis
+            ax_3 = axes_of_inertia[:, 2]  # Third principal axis
+            sorted_axes_aoi = self.canonicalize_aoi_simple(centroid, ax_1, ax_2, ax_3)
+            # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3, -ax_3, -ax_2, -ax_1])
+            decomposed_tensor = self.split_tensor(I[i], sorted_axes_aoi[0], sorted_axes_aoi[1], sorted_axes_aoi[2])
+            all_axes[i] = sorted_axes_aoi
+            dec_tensors[i] = decomposed_tensor
+        n_vecs = 3
+        #all_axes_full = self.init_aoi_linear(all_axes[:, :n_vecs, :])
+        #dec_tensors_full = self.init_tensors_linear(dec_tensors)
+        all_axes_full = all_axes
+        dec_tensors_full = dec_tensors
+        return all_axes_full, dec_tensors_full, None
+
+    def canonicalize_aoi_simple(self, vector_to_dot, ax_1, ax_2, ax_3):
+        dot_products_1 = torch.tensor([
+            torch.dot(ax_1, vector_to_dot),
+            torch.dot(-ax_1, vector_to_dot),
+        ])
+        dot_products_2 = torch.tensor([
+            torch.dot(ax_2, vector_to_dot),
+            torch.dot(-ax_2, vector_to_dot),
+        ])
+        dot_products_3 = torch.tensor([
+            torch.dot(ax_3, vector_to_dot),
+            torch.dot(-ax_3, vector_to_dot),
+        ])
+
+        sorted_indices_1 = torch.argsort(dot_products_1, descending=True)
+        sorted_indices_2 = torch.argsort(dot_products_2, descending=True)
+        sorted_indices_3 = torch.argsort(dot_products_3, descending=True)
+
+        sa_aoi_1 = torch.stack([ax_1, -ax_1])[sorted_indices_1]
+        sa_aoi_2 = torch.stack([ax_2, -ax_2])[sorted_indices_2]
+        sa_aoi_3 = torch.stack([ax_3, -ax_3])[sorted_indices_3]
+        # sorted_axes_aoi = torch.stack([ax_1, ax_2, ax_3]) * (torch.randint(0, 2, (3,), device=COM.device).float() * 2 - 1)
+        # sorted_axes_aoi = torch.cat([sorted_axes_aoi, -sorted_axes_aoi])
+        sorted_axes_aoi = torch.stack([sa_aoi_1[0], sa_aoi_2[0], sa_aoi_3[0], sa_aoi_3[1], sa_aoi_2[1], sa_aoi_1[1]])
+        return sorted_axes_aoi
 
     def normalize_matrix(self, matrix):
         orig_shape = matrix.shape
@@ -397,6 +520,25 @@ class MiaoNet(AtomicModule):
         matrix = matrix / denom
         matrix = matrix.view(orig_shape)
         return matrix
+    #@compile_with_dynamic_shapes
+    def split_tensor(self, tensor, ax_1, ax_2, ax_3):
+        split_tensor = torch.zeros((5, 3, 3), device=tensor.device, dtype=tensor.dtype)
+        scalar_part = (torch.trace(tensor) / 3) * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
+
+        deviatoric_tensor = tensor - scalar_part * torch.eye(3, device=tensor.device, dtype=tensor.dtype)
+        # Use cross product to keep the matrix reflection invariant
+        c12 = torch.cross(ax_1, ax_2)
+        c23 = torch.cross(ax_2, ax_3)
+        c31 = torch.cross(ax_3, ax_1)
+        ax1_tens = torch.tensor([[0, c12[2], -c12[1]], [-c12[2], 0, c12[0]], [c12[1], -c12[0], 0]])
+        ax2_tens = torch.tensor([[0, c23[2], -c23[1]], [-c23[2], 0, c23[0]], [c23[1], -c23[0], 0]])
+        ax3_tens = torch.tensor([[0, c31[2], -c31[1]], [-c31[2], 0, c31[0]], [c31[1], -c31[0], 0]])
+        split_tensor[0] = scalar_part
+        split_tensor[1] = deviatoric_tensor
+        split_tensor[2] = ax1_tens * (1/3)
+        split_tensor[3] = ax2_tens * (1/3)
+        split_tensor[4] = ax3_tens * (1/3)
+        return split_tensor
 
     #@compile_with_dynamic_shapes
     def split_batch_tensor(self, tensor, weights):
@@ -491,12 +633,11 @@ class MiaoNet(AtomicModule):
             r = r_flat_wrapped.reshape(n_atoms, n_atoms, 3)
 
         r_norm2 = (r**2).sum(dim=-1, keepdim=True)   # (n,n,1)
-        # Add small epsilon to avoid division by zero
         eye3    = torch.eye(3, dtype=r.dtype, device=r.device).reshape(1,1,3,3)
         outer_r = r.unsqueeze(-1) * r.unsqueeze(-2)  # (n,n,3,3)
 
         masses_reshaped = masses.reshape(1,-1,1,1)   # (1,n,1,1)
-        inertia_terms   = ( (r_norm2.unsqueeze(-1) * eye3 - outer_r) ) * masses_reshaped
+        inertia_terms   = (r_norm2.unsqueeze(-1)*eye3 - outer_r) * masses_reshaped
         I = inertia_terms.sum(dim=1)  # sum over j => (n,3,3)
 
         eigenvals, eigenvecs = torch.linalg.eigh(I)
@@ -511,4 +652,3 @@ class MiaoNet(AtomicModule):
         dec_tensors = self.split_tensor_batched(I, all_axes)
 
         return all_axes, dec_tensors, None
-

@@ -1,0 +1,115 @@
+eq_check: False
+wandb: True
+
+electra_type: single
+cbf: False
+# New stuff
+activation_type: silu
+plot_gaus_pos: False
+
+max_time: '13:12:00:00'
+max_epochs: 1000
+
+project_name: ELECTRA_MD
+save_memory: True
+
+
+MD_Data: True
+MD_ROOT: /home/scratch3/jels/MD
+MD_MOL: malonaldehyde
+
+crystal: False
+MD: True
+
+pbc: False
+wrap: False
+r_max: 3
+weight_decay: 0.00001
+
+poly_order: 5
+use_matrix_scalars: True
+
+
+hotpp_cutoff: 8
+hotpp_outdim: 750
+master_units: 750
+initial_lr: 0.00005
+final_lr: 0.00005
+n_warmups: 0
+clip_grad: True
+gradient_clip_value: 0.1
+negative_contributions: True
+use_pos_disp_functions: True
+use_matrix_scalars: True
+gaus_per_electrons: 90
+data_split: "full"
+lr_dec_every: 1
+lr_gamma: 0.9
+qm9_dens_path: /home/scratch3/jels/QM9_Full
+inference_cutoff: 10.0
+hotpp_nlayers: 6
+
+prune: True
+
+model_type: hotpp
+miaonet: miaomiao
+max_out_heads: [2,2,2] # scal, vec, tens
+head_activate_list: ['silu', 'silu', 'silu']
+#hotpp params
+norm_blocks: 'graph'
+conv_mode: node_j
+update_edge: False
+norm_heads: ['graph', 'graph', 'graph']
+n_max: 3
+out_max: 3
+embed_type: aufbau
+precision: float
+
+# MODEL PARAMS
+loss_type: "normal"
+loss_coef: 100
+huber_loss_threshold: 0.1
+reduce_weight_by: 4
+relu: True
+
+
+seed: 505
+n_train_points: 500000
+n_split_points: 500000
+n_split_points_single: 500000
+train_sample_all: True
+train_set_perc: 0.9
+n_files: 1500
+max_grid_points: 10000
+
+niflheim: True
+hpc: True
+
+# FOLDERS
+
+data_split_path: /home/energy/jels/ELECTRA_CLEAN/data_splits/
+
+hpc_base_path: /home/scratch3/jels/ELECTRA_CLEAN/
+niflheim_base_path: /home/scratch3/jels/ELECTRA_CLEAN/
+pred_dens_path_val: pred_dens/validation/
+density_delta_path_val: density_deltas/validation
+pred_dens_path_test: pred_dens/test/
+density_delta_path_test: density_deltas/test
+gaus_pos_path_val: gaussian_positions/validation/
+gaus_pos_path_test: gaussian_positions/test/
+
+model_dir: /home/scratch3/jels/ELECTRA_CLEAN/trained_models
+
+load_model: False
+load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-04-01_dulcet-hill-116.model_state_dict
+
+
+# TRAINING
+optimizer: adamw
+n_epochs: 1000
+real_batch_size: 1
+num_batches_before_update: 1
+eval_every: 1
+construct_test_cd: False
+construct_val_cd: False
+save_model: True

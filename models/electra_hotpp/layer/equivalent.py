@@ -22,6 +22,10 @@ from tools.graph_tools import plot_gaussian_arrows
 #   2: [n_atoms, n_channel, n_dim, n_dim]
 #   .....
 # coordinate: [n_atoms, n_dim]
+def compile_with_dynamic_shapes(fn):
+    torch._dynamo.config.dynamic_shapes = True
+    return torch.compile(fn)
+    #return fn
 
 __all__ = ["TensorLinear",
            "TensorBiLinear",
@@ -207,8 +211,10 @@ class SelfInteractionLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
+                #nn.Sigmoid(),
             ) for way in range(max_way + 1)])
+
+    #@compile_with_dynamic_shapes
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
                 ) -> Dict[int, torch.Tensor]:
@@ -235,6 +241,7 @@ class NonLinearLayer(nn.Module):
         super().__init__()
         self.activate_list = nn.ModuleList([TensorActivateDict[activate_fn](input_dim) for _ in range(max_way + 1)])
 
+    #@compile_with_dynamic_shapes
     def forward(self,
                 input_tensors: Dict[int, torch.Tensor],
                 ) -> Dict[int, torch.Tensor]:
@@ -264,7 +271,7 @@ class TensorProductLayer(nn.Module):
                     self.combinations.append((x_way, y_way, z_way))
                     self.coefficient[str((x_way, y_way, z_way))] = nn.Parameter(torch.tensor(1.))
 
-
+    #@compile_with_dynamic_shapes
     def forward(self,
                 x : Dict[int, torch.Tensor],
                 y : Dict[int, torch.Tensor],
@@ -304,7 +311,7 @@ class MultiBodyLayer(nn.Module):
                 nn.Linear(input_dim, output_dim, bias=True),
                 nn.Mish(),
                 nn.Linear(output_dim, output_dim, bias=True),
-                nn.Tanh()
+                #nn.Sigmoid(),
             ) for _ in range(max_way + 1)])
 
         n_body_tensors = [[1] *  (max_way + 1)]
@@ -323,6 +330,7 @@ class MultiBodyLayer(nn.Module):
                          bias=(way==0))
             for way in range(max_way + 1)])
 
+    #@compile_with_dynamic_shapes
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
                 ) -> Dict[int, torch.Tensor]:
@@ -340,7 +348,6 @@ class MultiBodyLayer(nn.Module):
                 for tensor in n_body_tensors[n][way1]:
                     n_body_tensors[n + 1][way3].append(
                         _aggregate_new(tensor, input_tensors[way2], way1, way2, way3)
-
                         )
         for way, linear in enumerate(self.linear_list):
             tensor = torch.cat([t for n in range(self.max_n_body) for t in n_body_tensors[n][way]], dim=1)  # nb, nc*n, nd, nd, ...
@@ -381,17 +388,17 @@ class GraphConvLayer(nn.Module):
         ])
         self.rbf_node_mixing_list = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(output_dim * 3, output_dim*3, bias=True),
+                nn.Linear(output_dim * 3, output_dim*2, bias=True),
                 nn.Mish(),
-                nn.Linear(output_dim*3, output_dim, bias=True),
-                nn.Tanh()
+                nn.Linear(output_dim*2, output_dim, bias=True),
+                #nn.Sigmoid(),
             )
             for r_way in range(max_r_way + 1)
         ])
 
         if conv_mode == 'node_j':
             self.U1 = SelfInteractionLayer(input_dim=input_dim, max_way=max_in_way, output_dim=output_dim)
-            self.U2 = MultiBodyLayer(max_n_body=3, input_dim=input_dim, output_dim=output_dim, max_way=max_in_way)
+            #self.U2 = MultiBodyLayer(max_n_body=3, input_dim=input_dim, output_dim=output_dim, max_way=max_in_way)
         elif conv_mode == 'node_edge':
             self.U = SelfInteractionLayer(input_dim=input_dim * 3,
                                           max_way=max_in_way,
@@ -404,6 +411,7 @@ class GraphConvLayer(nn.Module):
         self.max_r_way = max_r_way
         self.conv_mode = conv_mode
 
+    #@compile_with_dynamic_shapes
     def forward(self,
                 node_info  : Dict[int, torch.Tensor],
                 edge_info  : Dict[int, torch.Tensor],
@@ -422,8 +430,8 @@ class GraphConvLayer(nn.Module):
                 x[in_way] = torch.cat([node_info[in_way][idx_i],
                                        node_info[in_way][idx_j],
                                        edge_info[in_way]], dim=1)
-        x = self.U2(self.U1(x))
-        #x = self.U1(x)
+        #x = self.U2(x)
+        x = self.U1(x)
         # mol_id = ''.join(map(str, batch_data['atomic_number'].tolist()))
         for r_way, rbf_mixing in enumerate(self.rbf_mixing_list):
             fn = rbf_mixing(rbf_ij)
@@ -458,7 +466,7 @@ class GraphNorm(nn.Module):
         self.alpha.data.fill_(1.)
         self.gamma.data.fill_(1.)
         self.beta.data.fill_(0.)
-
+    #@compile_with_dynamic_shapes
     def forward(self,
                 input_tensors : Dict[int, torch.Tensor],
                 batch         : torch.Tensor,

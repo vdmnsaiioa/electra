@@ -7,7 +7,9 @@ from ..layer.equivalent import MultiBodyLayer, GraphConvLayer, NonLinearLayer, G
 from ..utils import find_distances, _scatter_add, res_add
 from .miao import MiaoNet
 from tools.graph_tools import plot_gaussian_arrows
-
+def compile_with_dynamic_shapes(fn):
+    torch._dynamo.config.dynamic_shapes = True
+    return torch.compile(fn)
 #TODO graph norm
 class UpdateNodeBlock(nn.Module):
     def __init__(self,
@@ -46,7 +48,7 @@ class UpdateNodeBlock(nn.Module):
         if norm == 'graph':
             self.norm = GraphNorm(max_way=max_out_way, n_channel=output_dim)
             
-
+    #@compile_with_dynamic_shapes
     def forward(self,
                 node_info    : Dict[int, torch.Tensor],
                 edge_info    : Dict[int, torch.Tensor],
@@ -147,7 +149,7 @@ class MiaoMiaoBlock(nn.Module):
                                             conv_mode=conv_mode)
         self.update_edge = update_edge
 
-
+    #@compile_with_dynamic_shapes
     def forward(self,
                 node_info    : Dict[int, torch.Tensor],
                 edge_info    : Dict[int, torch.Tensor],

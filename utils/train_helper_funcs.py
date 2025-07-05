@@ -75,16 +75,23 @@ def get_files(config):
     train_files_indices = data['train']
     test_files_indices = data['test']
     validation_files_indices = data['validation']
-
-    train_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in train_files_indices]
-    test_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in test_files_indices]
-    validation_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in validation_files_indices]
+    if file_split != "ECD" and file_split != "ECD_test" and file_split != "nmc":
+        train_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in train_files_indices]
+        test_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in test_files_indices]
+        validation_files = [f"{config['qm9_dens_path']}/{num:06}.CHGCAR.lz4" for num in validation_files_indices]
+    elif file_split == "ECD" or file_split == "ECD_test":
+        train_files = [f"{config['qm9_dens_path']}/{num}.chgcar.lz4" for num in train_files_indices]
+        test_files = [f"{config['qm9_dens_path']}/{num}.chgcar.lz4" for num in test_files_indices]
+        validation_files = [f"{config['qm9_dens_path']}/{num}.chgcar.lz4" for num in validation_files_indices]
+    else:
+        train_files = [f"{config['qm9_dens_path']}/{num}.CHGCAR.lz4" for num in train_files_indices]
+        test_files = [f"{config['qm9_dens_path']}/{num}.CHGCAR.lz4" for num in test_files_indices]
+        validation_files = [f"{config['qm9_dens_path']}/{num}.CHGCAR.lz4" for num in validation_files_indices]
     random.shuffle(train_files)
     random.shuffle(test_files)
     random.shuffle(validation_files)
 
     return train_files, test_files, validation_files
-
 
 def load_csv_to_dict(file_path, key_column, value_column):
     result_dict = {}

@@ -7,7 +7,6 @@ class DensityLoss:
         self.device = device
         self.use_wandb = config['wandb']
         self.density_loss_fn = torch.nn.L1Loss(reduction='sum')
-        self.r2loss = torch.nn.L1Loss()
         self.loss_type = config['loss_type']
         self.loss_coef = torch.tensor(config['loss_coef'], device=device)
         self.huber_loss_threshold = torch.tensor(config['huber_loss_threshold'], device=device)
@@ -18,15 +17,8 @@ class DensityLoss:
         else:
             delta = torch.abs(pred_cd.flatten()[sampled_points] - true_cd_tens.flatten()[sampled_points]).sum()
         # percent_error = torch.abs(pred_cd-true_cd_tens).sum()*dv/n_valence_electrons
-        #integrated_error = (delta * dv) / n_valence_electrons
-        integrated_error = delta / true_cd_tens.sum()
+        integrated_error = (delta * dv) / n_valence_electrons
         return integrated_error
-
-    def compute_R2_loss(self, pred_cd: torch.tensor, true_cd_tens: torch.tensor):
-        pred_cd = pred_cd.to(self.device)
-        true_cd_tens = true_cd_tens.to(self.device)
-        R2_loss = self.r2loss(pred_cd.flatten(), true_cd_tens.flatten())
-        return R2_loss
 
 
     def compute_total_loss(self, sys: Atoms,
@@ -57,7 +49,6 @@ class DensityLoss:
                 self.loss_coef * self.huber_loss_threshold * (integrated_error - 0.5 * self.huber_loss_threshold)
             )
         else:
-            #loss = self.compute_R2_loss(pred_cd, true_cd_tens)
             loss = integrated_error
 
         if self.use_wandb and training:

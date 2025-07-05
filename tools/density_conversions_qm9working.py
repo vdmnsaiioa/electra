@@ -32,13 +32,9 @@ def normalize_density(n_elec: int,
         n_elec = n_elec
     else:
         n_elec = qm9_density.flatten()[points].sum() * dv
-    sum_target = qm9_density.flatten().sum()
-    sum_pred = density.flatten().sum()
-    factor = sum_target / sum_pred
+    integrated_num_electrons = density.sum() * dv
+    factor = n_elec / integrated_num_electrons
     cd_sum_to_num_electrons = density * factor
-    #integrated_num_electrons = density.sum() * dv
-    #factor = n_elec / integrated_num_electrons
-    #cd_sum_to_num_electrons = density * factor
     return cd_sum_to_num_electrons, n_elec
 
 
@@ -48,7 +44,7 @@ def get_electron_normalized_density(sys: Atoms,
     # This function returns a charge density that actually sums to the required number of electrons by just summing naively (with no integration)
     # Probably not required for anything.
     dv = sys.get_volume() / sys.calc.get_number_of_grid_points().prod()
-    integrated_num_electrons = cd.sum() / gridrefinement ** 3
+    integrated_num_electrons = cd.sum() * dv / gridrefinement ** 3
     cd_sum_to_num_electrons = cd / cd.sum() * integrated_num_electrons
     return cd_sum_to_num_electrons
 
@@ -85,20 +81,7 @@ def chgcar_to_cd(chgcar_file):
     cd = torch.FloatTensor(charge_density).squeeze(axis=0)
     return cd, atoms
 
-def cd_to_chgcar_mat(original_file: str, atoms: Atoms, cd: np.array, filename: str):
-    with lz4.frame.open(original_file, mode='rb') as fp:
-        filecontent = fp.read()
-    tmpfd, tmppath = tempfile.mkstemp(prefix="tmpchgcar")
-    with os.fdopen(tmpfd, "wb") as tmpfile:
-        tmpfile.write(filecontent)
-    vcd = CustomVaspChargeDensity(tmppath)
-    os.remove(tmppath)
-    vcd.chg = [cd]
-    vcd.atoms = [atoms]
-    vcd.write(filename, format='chgcar')
-    return cd, atoms
-
-def cd_to_chgcar_mol(atoms: Atoms, cd: np.array, filename: str):
+def cd_to_chgcar(atoms: Atoms, cd: np.array, filename: str):
     with open(filename, 'w') as fp:
         pass
     vcd = CustomVaspChargeDensity(filename)
@@ -112,9 +95,8 @@ def get_qm9_density(qm9_path):
     grid_dict = {"nx": qm9_density.shape[0],
                       "ny": qm9_density.shape[1],
                       "nz": qm9_density.shape[2]}
-    n_elec_qm9 = check_number_of_electrons(mol, qm9_density, grid_dict=grid_dict)
+    n_elec_qm9 = valence_electrons(mol.get_chemical_formula())
     return qm9_density, mol, n_elec_qm9, grid_dict
-
 
 
 
