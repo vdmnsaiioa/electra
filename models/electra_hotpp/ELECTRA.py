@@ -105,6 +105,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
+        # Network for predicting molecular energy from scalar features
+        self.energy_network = nn.Sequential(
+            nn.Linear(4 * self.units, self.units * 2),
+            nn.Mish(),
+            nn.Linear(self.units * 2, 1)
+        )
 
         self.precision = torch.float32
         if self.config["crystal"]:
@@ -201,6 +207,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
 
+        # Predict energy contribution per atom using scalar features
+        energy_per_atom = self.energy_network(wsm_).squeeze(-1)
+        energy = torch.sum(energy_per_atom)
+                    
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
 
@@ -248,6 +258,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                   "pos_disp": pos_disp_final,
                   "weights": weights_sm,
                   "scal_mults": scal_mults_th,
+                  "energy":energy,
                   "n_multiples": n_multiples,
                   "cell": torch.tensor(atoms.cell[:]).to(self.device) if atoms.pbc.all() else None,
                   "image_weights": image_weights
