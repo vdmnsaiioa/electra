@@ -22,7 +22,7 @@ from tools.ase_converter import Atoms2Graph
 from modules.grid2pos import grid2pos
 from tools.density_conversions import normalize_density, cd_to_chgcar_mat, cd_to_chgcar_mol, get_qm9_density
 from tools.graph_tools import CollateFuncAtoms
-from utils.train_helper_funcs import set_optimizer
+from utils.train_helper_funcs import set_optimizer, load_csv_to_dict
 from modules.loss import DensityLoss
 import os
 from tools.visualization import create_chg_delta
@@ -105,12 +105,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
-        # Network for predicting molecular energy from scalar features
-        self.energy_network = nn.Sequential(
-            nn.Linear(4 * self.units, self.units * 2),
-            nn.Mish(),
-            nn.Linear(self.units * 2, 1)
-        )
 
         self.precision = torch.float32
         if self.config["crystal"]:
@@ -119,6 +113,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 nn.Mish(),
                 nn.Linear(self.units * 3, 27*self.units),
             )
+         # Network for predicting molecular energy from scalar features
+        self.energy_network = nn.Sequential(
+        nn.Linear(4 * self.units, self.units * 2),
+        nn.Mish(),
+        nn.Linear(self.units * 2, 1)
+        )
+        self.energy_loss_fn = nn.MSELoss()
+        self.energy_loss_coef = config.get("energy_loss_coef", 1.0)
 
 
     def forward(self,
@@ -210,7 +212,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         # Predict energy contribution per atom using scalar features
         energy_per_atom = self.energy_network(wsm_).squeeze(-1)
         energy = torch.sum(energy_per_atom)
-                    
+        # guga
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
 
@@ -257,8 +259,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         result = {"cov": cov_final,
                   "pos_disp": pos_disp_final,
                   "weights": weights_sm,
+                  "energy": energy,
                   "scal_mults": scal_mults_th,
-                  "energy":energy,
                   "n_multiples": n_multiples,
                   "cell": torch.tensor(atoms.cell[:]).to(self.device) if atoms.pbc.all() else None,
                   "image_weights": image_weights
@@ -304,7 +306,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def training_step(self,
                       batch,
                       batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
+        energy = rest[0] if rest else None
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -391,6 +394,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             training=True,
             mol_volume=mol_volume,
         )
+
+        energy_loss = None
+        if energy is not None:
+            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
+            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            loss = loss + self.energy_loss_coef * energy_loss
+        
         np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
         if self.config['crystal']:
             cell = qm9_mol.get_cell()
@@ -417,8 +427,24 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
+        
+        if energy_loss is not None:
+            self.log("Train Energy Loss",
+                        energy_loss.detach(),
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        batch_size=1)
+        
         if self.config['hpc']:
-            wandb.log({"Train Density Err %": np.round(100 * dens_error.detach().cpu().numpy(), 3)})
+            wandb_dict = {
+                "Train Density Err %": np.round(100 * dens_error.detach().cpu().numpy(), 3)
+            }
+            if energy_loss is not None:
+                wandb_dict["Train Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+            wandb.log(wandb_dict)
+
         if batch_idx < self.config['n_warmups']:
             self.optimizers().optimizer.param_groups[0]['lr'] = self.config['final_lr'] *((batch_idx+1)/self.config['n_warmups'])
         return loss
@@ -426,7 +452,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def validation_step(self,
                         batch,
                         batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
+        energy = rest[0] if rest else None
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -505,6 +532,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             training=False,
             mol_volume=mol_volume
         )
+
+        energy_loss = None
+        if energy is not None:
+            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
+            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            loss = loss + self.energy_loss_coef * energy_loss
+
         np_err = np.round(100 * density_error.detach().cpu().numpy(), 3)
         self.log("Validation Density Err %",
                  np_err,
@@ -513,8 +547,19 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
+        if energy_loss is not None:
+            self.log("Validation Energy Loss",
+                        energy_loss.detach(),
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        batch_size=1)
         if self.config['hpc']:
-            wandb.log({"Validation Density Err %": np_err})
+            wandb_dict = {"Validation Density Err %": np_err}
+            if energy_loss is not None:
+                wandb_dict["Validation Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+            wandb.log(wandb_dict)
 
         if batch_idx == 0 and self.config['save_model']:
             self.model_handler.save(self)
@@ -581,7 +626,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         """atom_types can be a list of atom types to predict the density for, e.g. [1,6] if only Hydrogen and Carbon.
         If None, all atoms are considered.
         atom_idxs can be a list of atom indices to predict the density for, e.g. [0,1,2] if only the first three atoms."""
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, *_ = batch[0]
 
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
         pos_grid = pos_grid.to(self.device)
@@ -658,7 +703,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def test_step(self,
                         batch,
                         batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
+        energy = rest[0] if rest else None
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -733,6 +779,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             training=False,
             mol_volume=mol_volume,
         )
+
+        energy_loss = None
+        if energy is not None:
+            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
+            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            loss = loss + self.energy_loss_coef * energy_loss
+
         np_err = np.round(100 * density_error.detach().cpu().numpy(),3)
         self.log("Test Density Err %",
                  np_err,
@@ -741,6 +794,15 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
+        
+        if energy_loss is not None:
+            self.log("Test Energy Loss",
+                     energy_loss.detach(),
+                     on_step=True,
+                     on_epoch=True,
+                     prog_bar=False,
+                     logger=True,
+                     batch_size=1)
 
         if self.config['hpc']:
             wandb.log({"Test Density Err %": np_err})
@@ -793,7 +855,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 translation = None,
                 inversion = False):
 
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename = batch[0]
+        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, *_ = batch[0]
         qm9_mol.pbc = False
         pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
         grid_nonrot = torch.tensor(pos_grid)
@@ -1256,6 +1318,12 @@ class QM9Dataset(Dataset):
         self.config = config
         self.cache = {}
 
+        energy_csv = config.get("energy_csv")
+        if energy_csv:
+            self.energy_dict = load_csv_to_dict(energy_csv, "file", "energy")
+        else:
+            self.energy_dict = None
+
     def __len__(self):
         return len(self.file_list)
 
@@ -1272,11 +1340,18 @@ class QM9Dataset(Dataset):
             except Exception as e:
                 print(f"Error loading {mol_cd_file}: {e}")
                 idx = np.random.randint(0, len(self.file_list)-1)
+
+        energy = None
+        if self.energy_dict is not None:
+            key = os.path.basename(mol_cd_file).split('.')[0]
+            if key in self.energy_dict:
+                energy = float(self.energy_dict[key])
+
         if not self.config["save_memory"]:
-            self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None)
+            self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None, energy)
             return self.cache[mol_cd_file]
         else:
-            return (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None)
+            return (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None, energy)
 
 
 def wrap_to_cell(positions, cell):
@@ -1354,6 +1429,12 @@ class SmallDensityDataset(Dataset):
         self.densities = self._convert_fft(np.load(os.path.join(self.data_path, 'dft_densities.npy')))
         self.grid_coord = self._generate_grid()
 
+        energy_file = os.path.join(self.data_path, 'energies.npy')
+        if os.path.isfile(energy_file):
+            self.energies = np.load(energy_file)
+        else:
+            self.energies = None
+
     def _convert_fft(self, fft_coeff):
         # The raw data are stored in Fourier basis, we need to convert them back.
         print(f'Precomputing {self.split} density from FFT coefficients ...')
@@ -1385,8 +1466,13 @@ class SmallDensityDataset(Dataset):
         density = self.densities[item]
         grid_dict = {"nx": self.n_grid, "ny": self.n_grid, "nz": self.n_grid}
         n_elec = valence_electrons(mol.get_chemical_formula())
+
+        energy = None
+        if self.energies is not None:
+            energy = float(self.energies[item])
+
         return(
-            density, mol, n_elec, grid_dict, None, self.grid_coord
+            density, mol, n_elec, grid_dict, None, self.grid_coord, energy
         )
 
     def __len__(self):
