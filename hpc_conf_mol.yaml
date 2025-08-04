@@ -11,10 +11,10 @@ max_time: '30:00:00:00'
 #max_time: '00:00:02:00'
 max_epochs: 1000
 
-project_name: ELECTRA_QM9
+project_name: electra1
 save_memory: True
 
-MD: True
+MD: False
 crystal: False
 nmc: False
 
@@ -67,7 +67,8 @@ loss_coef: 100
 huber_loss_threshold: 0.1
 reduce_weight_by: 4
 relu: True
-
+energy_csv: /home/energy/s234633/ELECTRA/data_splits/energies.csv
+energy_loss_coef: 1.0
 
 seed: 505
 n_train_points: 500000
@@ -83,10 +84,10 @@ hpc: True
 
 # FOLDERS
 
-data_split_path: /home/energy/jels/ELECTRA_CLEAN/data_splits/
+data_split_path: /home/energy/s234633/ELECTRA/data_splits/
 
-hpc_base_path: /home/scratch3/jels/ELECTRA_CLEAN/
-niflheim_base_path: /home/scratch3/jels/ELECTRA_CLEAN/
+hpc_base_path: /home/energy/s234633/ELECTRA/
+niflheim_base_path: /home/energy/s234633/ELECTRA/
 pred_dens_path_val: pred_dens/validation/
 density_delta_path_val: density_deltas/validation
 pred_dens_path_test: pred_dens/test/
@@ -94,11 +95,11 @@ density_delta_path_test: density_deltas/test
 gaus_pos_path_val: gaussian_positions/validation/
 gaus_pos_path_test: gaussian_positions/test/
 
-model_dir: /home/scratch3/jels/ELECTRA_CLEAN/trained_models
+model_dir: /home/energy/s234633/ELECTRA/trained_models
 
 load_model: False
 #load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-04-11_polar-glade-110.model_state_dict
-load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-05-02_true-bee-160.model_state_dict
+#load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-05-02_true-bee-160.model_state_dict
 
 
 # TRAINING
