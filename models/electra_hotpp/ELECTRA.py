@@ -307,7 +307,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                       batch,
                       batch_idx: int):
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
-        energy = rest[0] if rest else None
+        energy = rest[0]
+ 
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -396,11 +397,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
+        
         if energy is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             energy_loss = self.energy_loss_fn(result['energy'], target_energy)
             loss = loss + self.energy_loss_coef * energy_loss
-        
+
         np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
         if self.config['crystal']:
             cell = qm9_mol.get_cell()
@@ -420,15 +422,15 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 else:
                     print("Non-orthogonal error %: ", np_err)
 
-        self.log("Train Density Err %",
+        self.log("Train Density Err calu %",
                  np.round(100 * dens_error.detach().cpu().numpy(), 3),
                  on_step=True,
                  on_epoch=True,
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
-        
-        if energy_loss is not None:
+        print(energy_loss,': energy loss')
+        try:
             self.log("Train Energy Loss",
                         energy_loss.detach(),
                         on_step=True,
@@ -436,10 +438,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
                         prog_bar=False,
                         logger=True,
                         batch_size=1)
+        except Exception as e:
+            print(e)
         
         if self.config['hpc']:
             wandb_dict = {
-                "Train Density Err %": np.round(100 * dens_error.detach().cpu().numpy(), 3)
+                "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3)
             }
             if energy_loss is not None:
                 wandb_dict["Train Energy Loss"] = float(energy_loss.detach().cpu().numpy())
@@ -794,8 +798,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
-        
+    
         if energy_loss is not None:
+        
             self.log("Test Energy Loss",
                      energy_loss.detach(),
                      on_step=True,
@@ -1319,9 +1324,10 @@ class QM9Dataset(Dataset):
         self.cache = {}
 
         energy_csv = config.get("energy_csv")
-        if energy_csv:
+        try:
             self.energy_dict = load_csv_to_dict(energy_csv, "file", "energy")
-        else:
+        except Exception as e:
+            print(e)
             self.energy_dict = None
 
     def __len__(self):
@@ -1344,9 +1350,13 @@ class QM9Dataset(Dataset):
         energy = None
         if self.energy_dict is not None:
             key = os.path.basename(mol_cd_file).split('.')[0]
-            if key in self.energy_dict:
-                energy = float(self.energy_dict[key])
-
+            lookup_keys = [key]
+            key_no_zeros = key.lstrip('0') or '0'
+            try:
+                energy = float(self.energy_dict[key_no_zeros])
+            except Exception as e:
+                print(e)
+                
         if not self.config["save_memory"]:
             self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None, energy)
             return self.cache[mol_cd_file]
