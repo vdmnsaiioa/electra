@@ -78,7 +78,7 @@ def load_base_config() -> dict:
     """Load the base YAML configuration depending on GPU availability and flags inside the YAML."""
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
-        base_path = "/home/energy/jels/ELECTRA_CLEAN"
+        base_path = "/home/energy/s234633/ELECTRA"
         config = yaml.safe_load(open(f"{base_path}/hpc_conf_mol.yaml"))
         if config['crystal']:
             sub = 'crystal_nmc' if config.get('nmc', False) else 'crystal'
@@ -93,6 +93,10 @@ def load_base_config() -> dict:
             config = yaml.safe_load(open(f"config_{sub}.yaml"))
         elif config.get('MD', False):
             config = yaml.safe_load(open("config_md.yaml"))
+
+    config = yaml.safe_load(open(f"{base_path}/hpc_conf_mol.yaml"))
+    print(config)
+
     return config
 
 
