@@ -403,6 +403,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             energy_loss = self.energy_loss_fn(result['energy'], target_energy)
             loss = loss + self.energy_loss_coef * energy_loss
 
+        total_loss = loss.detach()
+
         np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
         if self.config['crystal']:
             cell = qm9_mol.get_cell()
@@ -430,7 +432,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         print(energy_loss,': energy loss')
-        try:
+        if energy_loss is not None:
             self.log("Train Energy Loss",
                         energy_loss.detach(),
                         on_step=True,
@@ -438,12 +440,19 @@ class ELECTRA(L.LightningModule, IOMixIn):
                         prog_bar=False,
                         logger=True,
                         batch_size=1)
-        except Exception as e:
-            print(e)
+            
+        self.log("Train Total Loss",
+                 total_loss,
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
+                 logger=True,
+                 batch_size=1)
         
         if self.config['hpc']:
             wandb_dict = {
-                "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3)
+                "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
+                "Train Total Loss": float(total_loss.cpu().numpy())
             }
             if energy_loss is not None:
                 wandb_dict["Train Energy Loss"] = float(energy_loss.detach().cpu().numpy())
@@ -543,12 +552,22 @@ class ELECTRA(L.LightningModule, IOMixIn):
             energy_loss = self.energy_loss_fn(result['energy'], target_energy)
             loss = loss + self.energy_loss_coef * energy_loss
 
+        total_loss = loss.detach()
+
         np_err = np.round(100 * density_error.detach().cpu().numpy(), 3)
         self.log("Validation Density Err %",
                  np_err,
                  on_step=True,
                  on_epoch=True,
                  prog_bar=True,
+                 logger=True,
+                 batch_size=1)
+        
+        self.log("Validation Total Loss",
+                 total_loss,
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
                  logger=True,
                  batch_size=1)
         if energy_loss is not None:
@@ -560,7 +579,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                         logger=True,
                         batch_size=1)
         if self.config['hpc']:
-            wandb_dict = {"Validation Density Err %": np_err}
+            wandb_dict = {"Validation Density Err %": np_err,
+                          "Validation Total Loss": float(total_loss.cpu().numpy())}
             if energy_loss is not None:
                 wandb_dict["Validation Energy Loss"] = float(energy_loss.detach().cpu().numpy())
             wandb.log(wandb_dict)
@@ -789,6 +809,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             energy_loss = self.energy_loss_fn(result['energy'], target_energy)
             loss = loss + self.energy_loss_coef * energy_loss
+        total_loss = loss.detach()
 
         np_err = np.round(100 * density_error.detach().cpu().numpy(),3)
         self.log("Test Density Err %",
@@ -798,7 +819,15 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
-    
+        
+        self.log("Test Total Loss",
+                 total_loss,
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
+                 logger=True,
+                 batch_size=1)
+        
         if energy_loss is not None:
         
             self.log("Test Energy Loss",
@@ -811,6 +840,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         if self.config['hpc']:
             wandb.log({"Test Density Err %": np_err})
+            wandb_dict = {"Test Density Err %": np_err,
+                          "Test Total Loss": float(total_loss.cpu().numpy())}
+            if energy_loss is not None:
+                wandb_dict["Test Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+            wandb.log(wandb_dict)
 
         if self.config['construct_test_cd'] and batch_idx % 100 == 0:
             qm9_path = os.path.join(self.qm9_dens_path, mol_cd_file)
