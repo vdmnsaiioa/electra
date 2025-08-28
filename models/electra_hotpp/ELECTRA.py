@@ -321,7 +321,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                       batch,
                       batch_idx: int):
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
-        energy = rest[0]
+        energy = rest[0] if len(rest) > 0 else None
+        atom_count = rest[1] if len(rest) > 1 else None
  
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
@@ -411,10 +412,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        
-        if energy is not None:
+        rmse = None
+
+        if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
+            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
+            energy_loss = energy_mse / atom_count_t
+            rmse = torch.sqrt(energy_loss)
             loss = loss + self.energy_loss_coef * energy_loss
 
         total_loss = loss.detach()
@@ -446,9 +451,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         print(energy_loss,': energy loss')
-        if energy_loss is not None:
-            self.log("Train Energy Loss",
-                        energy_loss.detach(),
+        if rmse is not None:
+            self.log("Train Energy RMSE",
+                        rmse.detach(),
                         on_step=True,
                         on_epoch=True,
                         prog_bar=False,
@@ -468,8 +473,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
                 "Train Total Loss bleadi": float(total_loss.cpu().numpy())
             }
-            if energy_loss is not None:
-                wandb_dict["Train Energy Loss huiadi"] = float(energy_loss.detach().cpu().numpy())
+            if rmse is not None:
+                wandb_dict["Train Energy RMSE"] = float(rmse.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx < self.config['n_warmups']:
@@ -480,7 +485,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                         batch,
                         batch_idx: int):
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
-        energy = rest[0] if rest else None
+        energy = rest[0] if len(rest) > 0 else None
+        atom_count = rest[1] if len(rest) > 1 else None
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -561,9 +567,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        if energy is not None:
+        rmse = None
+        if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
+            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
+            energy_loss = energy_mse / atom_count_t
+            rmse = torch.sqrt(energy_loss)
             loss = loss + self.energy_loss_coef * energy_loss
 
         total_loss = loss.detach()
@@ -584,9 +594,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=False,
                  logger=True,
                  batch_size=1)
-        if energy_loss is not None:
-            self.log("Validation Energy Loss",
-                        energy_loss.detach(),
+        if rmse is not None:
+            self.log("Validation Energy RMSE",
+                        rmse.detach(),
                         on_step=True,
                         on_epoch=True,
                         prog_bar=False,
@@ -595,8 +605,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if self.config['hpc']:
             wandb_dict = {"Validation Density Err %": np_err,
                           "Validation Total Loss": float(total_loss.cpu().numpy())}
-            if energy_loss is not None:
-                wandb_dict["Validation Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+            if rmse is not None:
+                wandb_dict["Validation Energy RMSE"] = float(rmse.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx == 0 and self.config['save_model']:
@@ -742,7 +752,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                         batch,
                         batch_idx: int):
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
-        energy = rest[0] if rest else None
+        energy = rest[0] if len(rest) > 0 else None
+        atom_count = rest[1] if len(rest) > 1 else None
         if pos_grid is None:
             pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
             pos_grid = pos_grid.to(self.device)
@@ -819,9 +830,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        if energy is not None:
+        rmse = None
+        if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            energy_loss = self.energy_loss_fn(result['energy'], target_energy)
+            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
+            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
+            energy_loss = energy_mse / atom_count_t
+            rmse = torch.sqrt(energy_loss)
             loss = loss + self.energy_loss_coef * energy_loss
         total_loss = loss.detach()
 
@@ -842,10 +857,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         
-        if energy_loss is not None:
-        
-            self.log("Test Energy Loss",
-                     energy_loss.detach(),
+        if rmse is not None:
+            self.log("Test Energy RMSE",
+                     rmse.detach(),
                      on_step=True,
                      on_epoch=True,
                      prog_bar=False,
@@ -856,8 +870,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             wandb.log({"Test Density Err %": np_err})
             wandb_dict = {"Test Density Err %": np_err,
                           "Test Total Loss": float(total_loss.cpu().numpy())}
-            if energy_loss is not None:
-                wandb_dict["Test Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+            if rmse is not None:
+                wandb_dict["Test Energy RMSE"] = float(rmse.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if self.config['construct_test_cd'] and batch_idx % 100 == 0:
@@ -1374,9 +1388,11 @@ class QM9Dataset(Dataset):
         energy_csv = config.get("energy_csv")
         try:
             self.energy_dict = load_csv_to_dict(energy_csv, "file", "energy")
+            self.atom_count_dict = load_csv_to_dict(energy_csv, "file", "atom_count")
         except Exception as e:
             print(e)
             self.energy_dict = None
+            self.atom_count_dict = None
 
     def __len__(self):
         return len(self.file_list)
@@ -1396,20 +1412,40 @@ class QM9Dataset(Dataset):
                 idx = np.random.randint(0, len(self.file_list)-1)
 
         energy = None
-        if self.energy_dict is not None:
+        atom_count = None
+        if self.energy_dict is not None and self.atom_count_dict is not None:
             key = os.path.basename(mol_cd_file).split('.')[0]
             lookup_keys = [key]
             key_no_zeros = key.lstrip('0') or '0'
             try:
                 energy = float(self.energy_dict[key_no_zeros])
+                atom_count = float(self.atom_count_dict[key_no_zeros])
             except Exception as e:
                 print(e)
-                
+
         if not self.config["save_memory"]:
-            self.cache[mol_cd_file] = (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None, energy)
+            self.cache[mol_cd_file] = (
+                qm9_density,
+                qm9_mol,
+                qm9_n_elec,
+                qm9_grid_dict,
+                mol_cd_file,
+                None,
+                energy,
+                atom_count,
+            )
             return self.cache[mol_cd_file]
         else:
-            return (qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, None, energy)
+            return (
+                qm9_density,
+                qm9_mol,
+                qm9_n_elec,
+                qm9_grid_dict,
+                mol_cd_file,
+                None,
+                energy,
+                atom_count,
+            )
 
 
 def wrap_to_cell(positions, cell):
