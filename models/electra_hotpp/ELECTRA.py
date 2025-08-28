@@ -120,8 +120,22 @@ class ELECTRA(L.LightningModule, IOMixIn):
         nn.Linear(self.units * 2, 1)
         )
         self.energy_loss_fn = nn.MSELoss()
-        self.energy_loss_coef = config.get("energy_loss_coef", 1.0)
+        #self.energy_loss_fn = self.normalized_l1_loss
+        self.energy_loss_coef = config.get("energy_loss_coef")
 
+    @staticmethod
+    def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Compute mean absolute percentage error between prediction and target.
+
+        Args:
+            pred (torch.Tensor): Predicted energy values.
+            target (torch.Tensor): Ground truth energy values.
+            eps (float, optional): Small constant to avoid division by zero.
+
+        Returns:
+            torch.Tensor: Normalized L1 loss.
+        """
+        return torch.mean(torch.abs(pred - target) / (torch.abs(target) + eps))
 
     def forward(self,
                 atoms,
@@ -452,10 +466,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if self.config['hpc']:
             wandb_dict = {
                 "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
-                "Train Total Loss": float(total_loss.cpu().numpy())
+                "Train Total Loss bleadi": float(total_loss.cpu().numpy())
             }
             if energy_loss is not None:
-                wandb_dict["Train Energy Loss"] = float(energy_loss.detach().cpu().numpy())
+                wandb_dict["Train Energy Loss huiadi"] = float(energy_loss.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx < self.config['n_warmups']:
