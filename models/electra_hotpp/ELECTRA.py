@@ -412,16 +412,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        rmse = None
+        nrmse = None
+        nl1 = None
 
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = energy_mse / atom_count_t
-            rmse = torch.sqrt(energy_loss)
+            energy_loss = energy_mse
+            nrmse = torch.sqrt(energy_mse) / atom_count_t
+            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
-            print(atom_count_t,'hahahahha')
 
         total_loss = loss.detach()
 
@@ -452,9 +453,16 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         print(energy_loss,': energy loss')
-        if rmse is not None:
-            self.log("Train Energy RMSE, meV/atom",
-                        rmse.detach(),
+        if nrmse is not None:
+            self.log("Train Energy NRMSE",
+                        nrmse.detach(),
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        batch_size=1)
+            self.log("Train Energy NL1",
+                        nl1.detach(),
                         on_step=True,
                         on_epoch=True,
                         prog_bar=False,
@@ -474,8 +482,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
                 "Train Total Loss bleadi": float(total_loss.cpu().numpy())
             }
-            if rmse is not None:
-                wandb_dict["Train Energy RMSE, meV"] = float(rmse.detach().cpu().numpy())
+            if nrmse is not None:
+                wandb_dict["Train Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
+                wandb_dict["Train Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx < self.config['n_warmups']:
@@ -568,13 +577,15 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        rmse = None
+        nrmse = None
+        nl1 = None
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = energy_mse / atom_count_t
-            rmse = torch.sqrt(energy_loss)
+            energy_loss = energy_mse
+            nrmse = torch.sqrt(energy_mse) / atom_count_t
+            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
 
         total_loss = loss.detach()
@@ -595,9 +606,16 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=False,
                  logger=True,
                  batch_size=1)
-        if rmse is not None:
-            self.log("Validation Energy RMSE",
-                        rmse.detach(),
+        if nrmse is not None:
+            self.log("Validation Energy NRMSE",
+                        nrmse.detach(),
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        batch_size=1)
+            self.log("Validation Energy NL1",
+                        nl1.detach(),
                         on_step=True,
                         on_epoch=True,
                         prog_bar=False,
@@ -606,8 +624,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if self.config['hpc']:
             wandb_dict = {"Validation Density Err %": np_err,
                           "Validation Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                wandb_dict["Validation Energy RMSE"] = float(rmse.detach().cpu().numpy())
+            if nrmse is not None:
+                wandb_dict["Validation Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
+                wandb_dict["Validation Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx == 0 and self.config['save_model']:
@@ -831,13 +850,15 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        rmse = None
+        nrmse = None
+        nl1 = None
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = energy_mse / atom_count_t
-            rmse = torch.sqrt(energy_loss)
+            energy_loss = energy_mse
+            nrmse = torch.sqrt(energy_mse) / atom_count_t
+            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
         total_loss = loss.detach()
 
@@ -858,9 +879,16 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         
-        if rmse is not None:
-            self.log("Test Energy RMSE",
-                     rmse.detach(),
+        if nrmse is not None:
+            self.log("Test Energy NRMSE",
+                     nrmse.detach(),
+                     on_step=True,
+                     on_epoch=True,
+                     prog_bar=False,
+                     logger=True,
+                     batch_size=1)
+            self.log("Test Energy NL1",
+                     nl1.detach(),
                      on_step=True,
                      on_epoch=True,
                      prog_bar=False,
@@ -871,8 +899,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             wandb.log({"Test Density Err %": np_err})
             wandb_dict = {"Test Density Err %": np_err,
                           "Test Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                wandb_dict["Test Energy RMSE"] = float(rmse.detach().cpu().numpy())
+            if nrmse is not None:
+                wandb_dict["Test Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
+                wandb_dict["Test Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if self.config['construct_test_cd'] and batch_idx % 100 == 0:
