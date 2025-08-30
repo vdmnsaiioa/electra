@@ -68,7 +68,7 @@ huber_loss_threshold: 0.1
 reduce_weight_by: 4
 relu: True
 energy_csv: /home/energy/s234633/ELECTRA/data_splits/energies.csv
-energy_loss_coef: 1.0
+energy_loss_coef: 0.05
 
 seed: 505
 n_train_points: 500000
