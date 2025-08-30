@@ -421,6 +421,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
             energy_loss = energy_mse / atom_count_t
             rmse = torch.sqrt(energy_loss)
             loss = loss + self.energy_loss_coef * energy_loss
+            print(atom_count_t,'hahahahha')
 
         total_loss = loss.detach()
 
@@ -452,7 +453,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  batch_size=1)
         print(energy_loss,': energy loss')
         if rmse is not None:
-            self.log("Train Energy RMSE",
+            self.log("Train Energy RMSE, meV/atom",
                         rmse.detach(),
                         on_step=True,
                         on_epoch=True,
@@ -474,7 +475,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 "Train Total Loss bleadi": float(total_loss.cpu().numpy())
             }
             if rmse is not None:
-                wandb_dict["Train Energy RMSE"] = float(rmse.detach().cpu().numpy())
+                wandb_dict["Train Energy RMSE, meV"] = float(rmse.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx < self.config['n_warmups']:
