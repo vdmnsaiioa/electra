@@ -231,6 +231,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
 
         pos_factors = pos_scalars[:, :self.units].reshape(n_atoms * self.units, 1)
+        # Clamp position factors to avoid overflow in the exponential
+        pos_factors = torch.clamp(pos_factors, -20, 20)
         pos_factors_2 = pos_scalars[:, self.units:self.units * 2].reshape(n_atoms * self.units, 1)
         pos_factors_3 = pos_scalars[:, self.units * 2:self.units * 3].reshape(n_atoms * self.units, 1)
 
@@ -248,6 +250,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         cov_final = X_tens.view(-1, 3, 3)
         cov_final = self.construct_pos_def(cov_final)
+        if not torch.isfinite(cov_final).all():
+            logger.warning("Non-finite values in cov_final")
 
         if self.config['use_pos_disp_functions']:
             pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*torch.square(pos_factors_2) + pos_disp_3 * pos_factors_3
@@ -270,6 +274,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             image_weights = None #torch.abs(self.image_network(wsm_).reshape(27, self.units*n_atoms))
         else:
             image_weights = None
+        if not torch.isfinite(pos_disp_final).all():
+            logger.warning("Non-finite values in pos_disp_final")
         result = {"cov": cov_final,
                   "pos_disp": pos_disp_final,
                   "weights": weights_sm,
