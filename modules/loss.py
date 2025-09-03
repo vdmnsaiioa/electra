@@ -19,7 +19,12 @@ class DensityLoss:
             delta = torch.abs(pred_cd.flatten()[sampled_points] - true_cd_tens.flatten()[sampled_points]).sum()
         # percent_error = torch.abs(pred_cd-true_cd_tens).sum()*dv/n_valence_electrons
         #integrated_error = (delta * dv) / n_valence_electrons
-        integrated_error = delta / true_cd_tens.sum()
+        epsilon = torch.finfo(true_cd_tens.dtype).eps
+        integrated_error = delta / (true_cd_tens.sum() + epsilon)
+        if torch.isnan(integrated_error) or torch.isinf(integrated_error):
+            integrated_error = torch.zeros_like(integrated_error)
+        else:
+            integrated_error = torch.clamp(integrated_error, min=0.0)
         return integrated_error
 
     def compute_R2_loss(self, pred_cd: torch.tensor, true_cd_tens: torch.tensor):
