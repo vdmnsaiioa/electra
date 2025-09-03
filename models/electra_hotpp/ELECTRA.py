@@ -388,13 +388,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3
         else:
             mol_volume = None
-        density, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                density=density,
-                                                qm9_density=qm9_density,
-                                                grid_dict=qm9_grid_dict,
-                                                sys=qm9_mol,
-                                                points=sampled_points,
-                                                mol_volume=mol_volume)
+        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                   density=density,
+                                                   qm9_density=qm9_density,
+                                                   grid_dict=qm9_grid_dict,
+                                                   sys=qm9_mol,
+                                                   points=sampled_points,
+                                                   mol_volume=mol_volume)
         end = time.time()
         if self.config['wandb']:
             wandb.log({"Full Inference Time TRAIN": end - start})
@@ -566,13 +566,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume = (BOHR_TO_ANGSTROM*20.0)**3
         else:
             mol_volume = None
-        density, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                density=density,
-                                                qm9_density=qm9_density,
-                                                grid_dict=qm9_grid_dict,
-                                                sys=qm9_mol,
-                                                points=sampled_points,
-                                                mol_volume=mol_volume)
+        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                   density=density,
+                                                   qm9_density=qm9_density,
+                                                   grid_dict=qm9_grid_dict,
+                                                   sys=qm9_mol,
+                                                   points=sampled_points,
+                                                   mol_volume=mol_volume)
         end = time.time()
         if self.config['wandb']:
             if wandb.run is not None:
@@ -788,12 +788,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
         sampled_points = None
         if self.config['relu']:
             density = torch.relu(density)
-        density, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                density=density,
-                                                qm9_density=qm9_density,
-                                                grid_dict=qm9_grid_dict,
-                                                sys=qm9_mol,
-                                                points=sampled_points)
+        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                   density=density,
+                                                   qm9_density=qm9_density,
+                                                   grid_dict=qm9_grid_dict,
+                                                   sys=qm9_mol,
+                                                   points=sampled_points)
         return density
 
     def test_step(self,
@@ -853,13 +853,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3
         else:
             mol_volume = None
-        density, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                density=density,
-                                                qm9_density=qm9_density,
-                                                grid_dict=qm9_grid_dict,
-                                                sys=qm9_mol,
-                                                points=sampled_points,
-                                                mol_volume=mol_volume)
+        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                   density=density,
+                                                   qm9_density=qm9_density,
+                                                   grid_dict=qm9_grid_dict,
+                                                   sys=qm9_mol,
+                                                   points=sampled_points,
+                                                   mol_volume=mol_volume)
         end = time.time()
 
         if self.config['wandb']:
@@ -1091,12 +1091,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                        r_mat=r_mat,
                                        grid_nonrot=grid_nonrot)
 
-        density_original, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                density=density_original,
-                                                qm9_density=qm9_density,
-                                                grid_dict=qm9_grid_dict,
-                                                sys=qm9_mol,
-                                                points=None)
+        density_original, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                            density=density_original,
+                                                            qm9_density=qm9_density,
+                                                            grid_dict=qm9_grid_dict,
+                                                            sys=qm9_mol,
+                                                            points=None)
 
         if r_mat is not None or inversion or translation is not None:
             sys_dist = gto(
@@ -1116,12 +1116,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                     n_points=self.config['n_split_points'],
                                                     sample_all=True)
 
-            density_transformed, n_val_elec = normalize_density(n_elec=qm9_n_elec,
-                                                             density=density_transformed,
-                                                             qm9_density=qm9_density,
-                                                             grid_dict=qm9_grid_dict,
-                                                             sys=qm9_mol,
-                                                             points=None)
+            density_transformed, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                                  density=density_transformed,
+                                                                  qm9_density=qm9_density,
+                                                                  grid_dict=qm9_grid_dict,
+                                                                  sys=qm9_mol,
+                                                                  points=None)
 
             return density_original, density_transformed
         else:
