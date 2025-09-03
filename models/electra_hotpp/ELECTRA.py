@@ -421,8 +421,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = energy_mse
+            print(energy_loss,'aaaa')
+            norm_energy_loss = energy_loss / atom_count_t
+            print(norm_energy_loss,'bbbb')
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
+            rmse_meV = rmse*27.2114*1000
+            nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
 
@@ -491,10 +496,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
                 "Train Total Loss bleadi": float(total_loss.cpu().numpy())
             }
-            if rmse is not None:
-                wandb_dict["Train Energy RMSE"] = float(rmse.detach().cpu().numpy())
-                wandb_dict["Train Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
-                wandb_dict["Train Energy NL1"] = float(nl1.detach().cpu().numpy())
+            
+            wandb_dict["Train Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
+            wandb_dict["Train Energy NRMSE in meV"] = float(nrmse_meV.detach().cpu().numpy())
+            wandb_dict["Train Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
         if batch_idx < self.config['n_warmups']:
@@ -595,8 +600,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = energy_mse
+            norm_energy_loss = energy_loss / atom_count_t
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
+            rmse_meV = rmse*27.2114*1000
+            nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
 
@@ -644,8 +652,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             wandb_dict = {"Validation Density Err %": np_err,
                           "Validation Total Loss": float(total_loss.cpu().numpy())}
             if rmse is not None:
-                wandb_dict["Validation Energy RMSE"] = float(rmse.detach().cpu().numpy())
-                wandb_dict["Validation Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
+                wandb_dict["Validation Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
+                wandb_dict["Validation Energy NRMSE in meV"] = float(nrmse_meV.detach().cpu().numpy())
                 wandb_dict["Validation Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
@@ -878,8 +886,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = energy_mse
+
+            norm_energy_loss = energy_loss / atom_count_t
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
+            rmse_meV = rmse*27.2114*1000
+            nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
         total_loss = loss.detach()
@@ -929,8 +941,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             wandb_dict = {"Test Density Err %": np_err,
                           "Test Total Loss": float(total_loss.cpu().numpy())}
             if rmse is not None:
-                wandb_dict["Test Energy RMSE"] = float(rmse.detach().cpu().numpy())
-                wandb_dict["Test Energy NRMSE"] = float(nrmse.detach().cpu().numpy())
+                wandb_dict["Test Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
+                wandb_dict["Test Energy NRMSE in meV"] = float(nrmse_meV.detach().cpu().numpy())
                 wandb_dict["Test Energy NL1"] = float(nl1.detach().cpu().numpy())
             wandb.log(wandb_dict)
 
