@@ -11,6 +11,7 @@ import time
 import os
 import tempfile
 import lz4
+import logging
 
 def convert_to_unnormalized_density(orig_density: np.array,
                                     normalized_transported_density: np.array):
@@ -34,12 +35,18 @@ def normalize_density(n_elec: int,
         n_elec = qm9_density.flatten()[points].sum() * dv
     sum_target = qm9_density.flatten().sum()
     sum_pred = density.flatten().sum()
-    factor = sum_target / sum_pred
-    cd_sum_to_num_electrons = density * factor
+    eps = 1e-12
+    if sum_pred < eps:
+        logging.warning("Predicted density sum below epsilon; skipping normalization.")
+        factor = 1.0
+        cd_sum_to_num_electrons = density
+    else:
+        factor = sum_target / (sum_pred + eps)
+        cd_sum_to_num_electrons = density * factor
     #integrated_num_electrons = density.sum() * dv
     #factor = n_elec / integrated_num_electrons
     #cd_sum_to_num_electrons = density * factor
-    return cd_sum_to_num_electrons, n_elec
+    return cd_sum_to_num_electrons, n_elec, factor
 
 
 def get_electron_normalized_density(sys: Atoms,
