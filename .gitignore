@@ -3,6 +3,4 @@
 /trained_models/
 /data_splits/atomization.csv
 /.idea
-/gaussian_positions
-__pycache__/
-*.pyc
+/gaussian_positions/
