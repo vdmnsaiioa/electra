@@ -113,11 +113,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 nn.Mish(),
                 nn.Linear(self.units * 3, 27*self.units),
             )
-         # Network for predicting molecular energy from scalar features
+        # Network for predicting molecular energy from scalar features
+        # Includes norms of \ell=1 features in addition to \ell=0 channels
         self.energy_network = nn.Sequential(
-        nn.Linear(4 * self.units, self.units * 2),
-        nn.Mish(),
-        nn.Linear(self.units * 2, 1)
+            nn.Linear(7 * self.units, self.units * 2),
+            nn.Mish(),
+            nn.Linear(self.units * 2, 1)
         )
         self.energy_loss_fn = nn.MSELoss()
         #self.energy_loss_fn = self.normalized_l1_loss
@@ -218,13 +219,25 @@ class ELECTRA(L.LightningModule, IOMixIn):
         pos_disp_2 = X_scal_vec.view(-1, 3)
         pos_disp_3 = X_tens_vec.view(-1, 3)
 
+        # Base scalar features used across networks
         wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         pos_scalars = self.pos_factors_network(wsm_)
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
 
-        # Predict energy contribution per atom using scalar features
-        energy_per_atom = self.energy_network(wsm_).squeeze(-1)
+        # Augment scalar features with norms of \ell=1 vectors for energy prediction
+        l1_norms = torch.cat(
+            (
+                torch.norm(X_scal_vec, dim=-1),
+                torch.norm(X_vec, dim=-1),
+                torch.norm(X_tens_vec, dim=-1),
+            ),
+            dim=-1,
+        )
+        energy_wsm_ = torch.cat((wsm_, l1_norms), dim=-1)
+
+        # Predict energy contribution per atom using scalar features and vector norms
+        energy_per_atom = self.energy_network(energy_wsm_).squeeze(-1)
         energy = torch.sum(energy_per_atom)
         # guga
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
