@@ -227,20 +227,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
 
-        l1_norms = torch.cat(
-            (
-                torch.norm(X_scal_vec, dim=-1),
-                torch.norm(X_vec, dim=-1),
-                torch.norm(X_tens_vec, dim=-1),
-            ),
-            dim=-1,
-        )
-        energy_wsm_ = torch.cat((wsm_, l1_norms), dim=-1)
-
-        # Predict energy contribution per atom using scalar features and vector norms
-        energy_per_atom = self.energy_network(energy_wsm_).squeeze(-1)
-
-        energy = torch.sum(energy_per_atom)
         # guga
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
@@ -294,6 +280,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if not torch.isfinite(pos_disp_final).all():
             logger.warning("Non-finite values in pos_disp_final")
             print('Non-finite values in pos_disp_final')
+
+        pos_disp_features = pos_disp_final.view(n_atoms, self.units * 3)
+        energy_input = torch.cat((wsm_, pos_disp_features), dim=-1)
+        energy_per_atom = self.energy_network(energy_input).squeeze(-1)
+        energy = torch.sum(energy_per_atom)
+
         result = {"cov": cov_final,
                   "pos_disp": pos_disp_final,
                   "weights": weights_sm,
