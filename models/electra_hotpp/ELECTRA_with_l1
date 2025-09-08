@@ -116,7 +116,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
             )
          # Network for predicting molecular energy from scalar features
         self.energy_network = nn.Sequential(
-            nn.Linear(7 * self.units, self.units * 2),
+            nn.Linear(5 * self.units, self.units * 2),
             nn.Mish(),
             nn.Linear(self.units * 2, 1)
         )
@@ -215,10 +215,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         X_tens_vec = self.slice(X_tens_vec, n_multiples).view(n_atoms, self.units, 3)
         X_tens = self.slice(X_tens, n_multiples).view(n_atoms, self.units, 3, 3)
 
-        self._current_X_scal_vec = X_scal_vec
-        self._current_X_vec = X_vec
-        self._current_X_tens_vec = X_tens_vec
-
         pos_disp = X_vec.view(-1, 3)
         pos_disp_2 = X_scal_vec.view(-1, 3)
         pos_disp_3 = X_tens_vec.view(-1, 3)
@@ -282,7 +278,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             logger.warning("Non-finite values in pos_disp_final")
             print('Non-finite values in pos_disp_final')
 
-        pos_disp_features = pos_disp_final.view(n_atoms, self.units * 3)
+        pos_disp_features = torch.linalg.norm(pos_disp_final.view(n_atoms, self.units,3),dim=-1)
+        self.pos_disp_text = pos_disp_features
         energy_input = torch.cat((wsm_, pos_disp_features), dim=-1)
         energy_per_atom = self.energy_network(energy_input).squeeze(-1)
         energy = torch.sum(energy_per_atom)
@@ -350,9 +347,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         if self.global_step == 0 and not hasattr(self, "_first_batch_written"):
             feature_dict = {
-                "X_scal_vec": self._current_X_scal_vec.detach().cpu().tolist(),
-                "X_vec": self._current_X_vec.detach().cpu().tolist(),
-                "X_tens_vec": self._current_X_tens_vec.detach().cpu().tolist(),
+                "pos_features": self.pos_disp_text.detach().cpu().tolist(),
             }
             with open("/home/energy/s234633/ELECTRA/first_batch_features.txt", "w") as f:
                 for name, values in feature_dict.items():
