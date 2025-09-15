@@ -128,6 +128,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.energy_loss_fn = nn.MSELoss()
         #self.energy_loss_fn = self.normalized_l1_loss
         self.energy_loss_coef = config.get("energy_loss_coef")
+        self.rmse_spike_file = config.get("rmse_spike_file", "rmse_spikes.csv")
+        if not os.path.exists(self.rmse_spike_file):
+            with open(self.rmse_spike_file, "w") as f:
+                f.write("formula,predicted_energy,true_energy\n")
+        self.prev_train_rmse = None
 
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -450,7 +455,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
-            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
+            pred_energy = result['energy']
+            energy_mse = self.energy_loss_fn(pred_energy, target_energy)
             energy_loss = energy_mse
             print(energy_loss,'aaaa')
             norm_energy_loss = energy_loss / atom_count_t
@@ -459,8 +465,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nrmse = rmse / atom_count_t
             rmse_meV = rmse*27.2114*1000
             nrmse_meV = nrmse*27.2114*1000
-            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
+            nl1 = torch.abs(pred_energy - target_energy) / atom_count_t
             loss = loss + self.energy_loss_coef * energy_loss
+            rmse_value = rmse.detach().item()
+            if self.prev_train_rmse is not None and rmse_value > 3 * self.prev_train_rmse:
+                formula = qm9_mol.get_chemical_formula()
+                with open(self.rmse_spike_file, "a") as f:
+                    f.write(f"{formula},{pred_energy.detach().item()},{target_energy.detach().item()}\n")
+            self.prev_train_rmse = rmse_value
 
         total_loss = loss.detach()
 
