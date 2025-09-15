@@ -537,6 +537,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             self.optimizers().optimizer.param_groups[0]['lr'] = self.config['final_lr'] *((batch_idx+1)/self.config['n_warmups'])
         return loss
 
+    #def on_after_backward(self) -> None:
+    #    """Clip gradients to prevent them from exceeding 0.01."""
+    #    torch.nn.utils.clip_grad_value_(self.parameters(), 0.01)
     def validation_step(self,
                         batch,
                         batch_idx: int):
