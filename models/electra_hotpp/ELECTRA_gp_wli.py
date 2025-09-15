@@ -1656,7 +1656,7 @@ class SmallDensityDataset(Dataset):
         d_flat = torch.flip(d.real.view(-1, self.n_grid ** 3), [-1]).detach()
         d_shaped = d_flat.view(-1, self.n_grid, self.n_grid, self.n_grid) #/ (self.bohr_to_ang ** 3)
         return d_shaped
-
+ 
     def _generate_grid(self):
         x = torch.linspace(self.grid_size / self.n_grid, self.grid_size, self.n_grid)
         return torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1).view(self.n_grid, self.n_grid, self.n_grid, 3).detach()
