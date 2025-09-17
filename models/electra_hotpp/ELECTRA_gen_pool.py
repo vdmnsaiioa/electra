@@ -125,6 +125,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nn.Linear(self.units, 1),
         )
 
+        # LayerNorm for stabilizing energy feature distribution prior to pooling
+        self.energy_layer_norm = nn.LayerNorm(4 * self.units)
+
         self.energy_loss_fn = nn.MSELoss()
         #self.energy_loss_fn = self.normalized_l1_loss
         self.energy_loss_coef = config.get("energy_loss_coef")
@@ -230,7 +233,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         wsm = self.wsm_network(wsm_)
 
         # Predict energy contribution per atom using scalar features
-        phi_out = self.phi_network(wsm_)
+        energy_features = self.energy_layer_norm(wsm_)
+        phi_out = self.phi_network(energy_features)
         pooled = phi_out.sum(dim=0)
         energy = self.rho_network(pooled).squeeze(-1)
         # guga
