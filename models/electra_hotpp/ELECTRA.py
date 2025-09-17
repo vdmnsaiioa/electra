@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 import wandb
 import logging
@@ -49,6 +50,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         super().__init__()
 
         self.save_args(locals(), kwargs)
+        torch.autograd.set_detect_anomaly(True)
+
         self.loss = DensityLoss(config=config,
                                 device=self.device)
         self.activation_type = config['activation_type']
@@ -63,6 +66,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.cutoff = config['hotpp_cutoff']
         self.negative_contributions = config['negative_contributions']
         self.config = config
+        self.nan_log_dir = self.config.get("nan_log_dir", "nan_logs") if self.config is not None else "nan_logs"
+        os.makedirs(self.nan_log_dir, exist_ok=True)
         self.train_files = train_files
         self.validation_files = validation_files
         self.test_files = test_files
@@ -315,6 +320,39 @@ class ELECTRA(L.LightningModule, IOMixIn):
         return matrix
 
 
+    @staticmethod
+    def _format_energy_value(value):
+        if value is None:
+            return "N/A"
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return f"{value.detach().cpu().item():.10g}"
+            return str(value.detach().cpu().tolist())
+        if isinstance(value, (int, float, np.floating)):
+            return f"{float(value):.10g}"
+        return str(value)
+
+    def _log_nan_issue(self, stage: str, loss_name: str, molecule: Atoms | None,
+                       predicted_energy, target_energy) -> None:
+        os.makedirs(self.nan_log_dir, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        formula = molecule.get_chemical_formula() if isinstance(molecule, Atoms) else "Unknown"
+        pred_val = self._format_energy_value(predicted_energy)
+        target_val = self._format_energy_value(target_energy)
+        filename = f"{stage}_{loss_name}_nan_{timestamp}.txt"
+        file_path = os.path.join(self.nan_log_dir, filename)
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(f"Stage: {stage}\n")
+                handle.write(f"Loss: {loss_name}\n")
+                handle.write(f"Formula: {formula}\n")
+                handle.write(f"Predicted energy: {pred_val}\n")
+                handle.write(f"Target energy: {target_val}\n")
+            logger.warning("NaN detected in %s during %s. Details saved to %s", loss_name, stage, file_path)
+        except OSError as exc:
+            logger.error("Failed to write NaN log file %s: %s", file_path, exc)
+
+
     def configure_optimizers(self):
         optimizer = set_optimizer(self, self.config)
         anneal_milestones = list(self.config['lr_dec_every'] * np.arange(1, 500))
@@ -417,6 +455,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume=mol_volume,
         )
 
+        density_loss = loss
+        if torch.isnan(density_loss):
+            self._log_nan_issue("train", "density_loss", qm9_mol, result.get('energy'), energy)
+            raise ValueError("NaN encountered in density loss during training")
+
         energy_loss = None
         rmse = None
         nrmse = None
@@ -430,6 +473,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             print(energy_loss,'aaaa')
             norm_energy_loss = energy_loss / atom_count_t
             print(norm_energy_loss,'bbbb')
+            if torch.isnan(energy_loss):
+                self._log_nan_issue("train", "energy_loss", qm9_mol, result['energy'], target_energy)
+                raise ValueError("NaN encountered in energy loss during training")
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
             rmse_meV = rmse*27.2114*1000
@@ -597,6 +643,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume=mol_volume
         )
 
+        density_loss = loss
+        if torch.isnan(density_loss):
+            self._log_nan_issue("validation", "density_loss", qm9_mol, result.get('energy'), energy)
+            raise ValueError("NaN encountered in density loss during validation")
+
         energy_loss = None
         rmse = None
         nrmse = None
@@ -607,6 +658,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             energy_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = energy_mse
             norm_energy_loss = energy_loss / atom_count_t
+            if torch.isnan(energy_loss):
+                self._log_nan_issue("validation", "energy_loss", qm9_mol, result['energy'], target_energy)
+                raise ValueError("NaN encountered in energy loss during validation")
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
             rmse_meV = rmse*27.2114*1000
@@ -883,6 +937,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
             mol_volume=mol_volume,
         )
 
+        density_loss = loss
+        if torch.isnan(density_loss):
+            self._log_nan_issue("test", "density_loss", qm9_mol, result.get('energy'), energy)
+            raise ValueError("NaN encountered in density loss during testing")
+
         energy_loss = None
         rmse = None
         nrmse = None
@@ -894,6 +953,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             energy_loss = energy_mse
 
             norm_energy_loss = energy_loss / atom_count_t
+            if torch.isnan(energy_loss):
+                self._log_nan_issue("test", "energy_loss", qm9_mol, result['energy'], target_energy)
+                raise ValueError("NaN encountered in energy loss during testing")
             rmse = torch.sqrt(energy_mse)
             nrmse = rmse / atom_count_t
             rmse_meV = rmse*27.2114*1000
