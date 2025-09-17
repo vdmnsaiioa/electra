@@ -1656,6 +1656,6 @@ class SmallDensityDataset(Dataset):
         return(
             density, mol, n_elec, grid_dict, None, self.grid_coord, energy
         )
-
+ 
     def __len__(self):
         return self.atom_coords.shape[0]
