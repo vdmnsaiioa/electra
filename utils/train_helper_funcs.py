@@ -8,21 +8,73 @@ import json
 
 
 def set_optimizer(tens_net, config):
-    if config['optimizer'] == 'adam':
-        optimizer = Adam(tens_net.parameters(),
-                         lr=config['initial_lr'],
-                         amsgrad=True,
-                         weight_decay=config['weight_decay'])
-    elif config['optimizer'] == 'adamw':
-        optimizer = AdamW(tens_net.parameters(),
-                          lr=config['initial_lr'],
-                          amsgrad=True,
-                          weight_decay=config['weight_decay'])
-    elif config['optimizer'] == 'sgd':
-        optimizer = SGD(tens_net.parameters(),
-                        lr=config['initial_lr'],
-                        momentum=config['momentum'],
-                        weight_decay=config['weight_decay'])
+    """Instantiate the optimizer configured for ``tens_net``.
+
+    If ``split_params`` is enabled in the configuration and the network
+    exposes an ``energy_network`` submodule, a dedicated parameter group is
+    created so a custom learning rate or weight decay can be configured via
+    ``energy_initial_lr`` and ``energy_weight_decay``.  Otherwise all
+    parameters share the base optimiser settings.
+    """
+
+    optimizer_name = config['optimizer']
+    base_lr = config['initial_lr']
+    base_weight_decay = config.get('weight_decay', 0.0)
+
+    param_groups = []
+    all_params = list(tens_net.parameters())
+
+    energy_params = []
+    if hasattr(tens_net, 'energy_network') and tens_net.energy_network is not None:
+        energy_params = list(tens_net.energy_network.parameters())
+
+    split_params = config.get('split_params', False)
+
+    if split_params and energy_params:
+        energy_param_ids = {id(p) for p in energy_params}
+        other_params = [p for p in all_params if id(p) not in energy_param_ids]
+    else:
+        other_params = all_params
+        energy_params = []
+
+    if other_params:
+        param_groups.append({
+            'params': other_params,
+            'lr': base_lr,
+            'weight_decay': base_weight_decay,
+        })
+
+    if energy_params:
+        energy_lr = config.get('energy_initial_lr', base_lr)
+        energy_weight_decay = config.get('energy_weight_decay', base_weight_decay)
+        param_groups.append({
+            'params': energy_params,
+            'lr': energy_lr,
+            'weight_decay': energy_weight_decay,
+        })
+        print(energy_lr,'cacucacu')
+
+    optimizer_kwargs = {}
+    if optimizer_name == 'adam':
+        optimizer_cls = Adam
+        optimizer_kwargs['amsgrad'] = True
+    elif optimizer_name == 'adamw':
+        optimizer_cls = AdamW
+        optimizer_kwargs['amsgrad'] = True
+    elif optimizer_name == 'sgd':
+        optimizer_cls = SGD
+        optimizer_kwargs['momentum'] = config['momentum']
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_name}")
+
+    if not param_groups:
+        # Fallback to the full parameter list if no groups were constructed.
+        param_groups = all_params
+
+    optimizer = optimizer_cls(param_groups,
+                              lr=base_lr,
+                              weight_decay=base_weight_decay,
+                              **optimizer_kwargs)
     return optimizer
 
 
