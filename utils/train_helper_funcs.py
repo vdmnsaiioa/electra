@@ -11,10 +11,10 @@ def set_optimizer(tens_net, config):
     """Instantiate the optimizer configured for ``tens_net``.
 
     If ``split_params`` is enabled in the configuration and the network
-    exposes an ``energy_network`` submodule, a dedicated parameter group is
-    created so a custom learning rate or weight decay can be configured via
-    ``energy_initial_lr`` and ``energy_weight_decay``.  Otherwise all
-    parameters share the base optimiser settings.
+    exposes ``phi_network`` and/or ``rho_network`` submodules, a dedicated
+    parameter group is created so a custom learning rate or weight decay can be
+    configured via ``energy_initial_lr`` and ``energy_weight_decay``.
+    Otherwise all parameters share the base optimiser settings.
     """
 
     optimizer_name = config['optimizer']
@@ -24,18 +24,20 @@ def set_optimizer(tens_net, config):
     param_groups = []
     all_params = list(tens_net.parameters())
 
-    energy_params = []
-    if hasattr(tens_net, 'energy_network') and tens_net.energy_network is not None:
-        energy_params = list(tens_net.energy_network.parameters())
+    special_params = []
+    if hasattr(tens_net, 'phi_network') and tens_net.phi_network is not None:
+        special_params.extend(list(tens_net.phi_network.parameters()))
+    if hasattr(tens_net, 'rho_network') and tens_net.rho_network is not None:
+        special_params.extend(list(tens_net.rho_network.parameters()))
 
     split_params = config.get('split_params', False)
 
-    if split_params and energy_params:
-        energy_param_ids = {id(p) for p in energy_params}
-        other_params = [p for p in all_params if id(p) not in energy_param_ids]
+    if split_params and special_params:
+        special_param_ids = {id(p) for p in special_params}
+        other_params = [p for p in all_params if id(p) not in special_param_ids]
     else:
         other_params = all_params
-        energy_params = []
+        special_params = []
 
     if other_params:
         param_groups.append({
@@ -44,15 +46,14 @@ def set_optimizer(tens_net, config):
             'weight_decay': base_weight_decay,
         })
 
-    if energy_params:
+    if special_params:
         energy_lr = config.get('energy_initial_lr', base_lr)
         energy_weight_decay = config.get('energy_weight_decay', base_weight_decay)
         param_groups.append({
-            'params': energy_params,
+            'params': special_params,
             'lr': energy_lr,
             'weight_decay': energy_weight_decay,
         })
-        print(energy_lr,'cacucacu')
 
     optimizer_kwargs = {}
     if optimizer_name == 'adam':
