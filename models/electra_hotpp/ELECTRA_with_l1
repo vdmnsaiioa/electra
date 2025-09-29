@@ -1,7 +1,9 @@
 
 from __future__ import annotations
 
+import json
 import time
+from collections import deque
 
 import wandb
 import logging
@@ -123,6 +125,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.energy_loss_fn = nn.MSELoss()
         #self.energy_loss_fn = self.normalized_l1_loss
         self.energy_loss_coef = config.get("energy_loss_coef")
+        self.energy_loss_history: deque[dict] = deque(maxlen=20)
+        self.energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
+        self._last_energy_nan_signature: tuple[str, int, int] | None = None
 
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -137,6 +142,95 @@ class ELECTRA(L.LightningModule, IOMixIn):
             torch.Tensor: Normalized L1 loss.
         """
         return torch.mean(torch.abs(pred - target) / (torch.abs(target) + eps))
+
+    def _get_entry_identifier(self, identifier: str | None, batch_idx: int) -> str:
+        if identifier:
+            base = os.path.basename(identifier)
+            return base.split(".")[0]
+        return f"batch_{batch_idx}"
+
+    @staticmethod
+    def _serialize_tensor(tensor: torch.Tensor | np.ndarray | None) -> dict | None:
+        if tensor is None:
+            return None
+        if isinstance(tensor, torch.Tensor):
+            cpu_tensor = tensor.detach().cpu()
+            return {
+                "shape": list(cpu_tensor.shape),
+                "values": cpu_tensor.reshape(-1).tolist(),
+            }
+        if isinstance(tensor, np.ndarray):
+            return {
+                "shape": list(tensor.shape),
+                "values": tensor.reshape(-1).tolist(),
+            }
+        return {"value": tensor}
+
+    @staticmethod
+    def _serialize_energy(value: torch.Tensor | float | int | None):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            flat = value.detach().cpu().reshape(-1)
+            if flat.numel() == 1:
+                return float(flat.item())
+            return flat.tolist()
+        return float(value)
+
+    def _write_energy_nan_history(self, stage: str) -> None:
+        if not self.energy_loss_history:
+            return
+        log_dir = os.path.dirname(self.energy_nan_log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        with open(self.energy_nan_log_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"Energy loss NaN detected during {stage} at step {int(self.global_step)} on {timestamp}.\n"
+            )
+            for entry in self.energy_loss_history:
+                fh.write(json.dumps(entry))
+                fh.write("\n")
+            fh.write("\n")
+
+    def _track_energy_information(
+        self,
+        *,
+        energy_loss: torch.Tensor | None,
+        stage: str,
+        identifier: str | None,
+        batch_idx: int,
+        qm9_mol: Atoms | None,
+        predicted_energy: torch.Tensor | None,
+        target_energy: torch.Tensor | float | None,
+        predicted_density: torch.Tensor | None,
+        target_density: torch.Tensor | np.ndarray | None,
+    ) -> None:
+        if predicted_energy is None or target_energy is None:
+            return
+        record = {
+            "stage": stage,
+            "global_step": int(self.global_step),
+            "batch_index": int(batch_idx),
+            "index": self._get_entry_identifier(identifier, batch_idx),
+            "molecular_formula": qm9_mol.get_chemical_formula() if qm9_mol is not None else None,
+            "predicted_energy": self._serialize_energy(predicted_energy),
+            "target_energy": self._serialize_energy(target_energy),
+            "predicted_density": self._serialize_tensor(predicted_density),
+            "target_density": self._serialize_tensor(target_density),
+        }
+        self.energy_loss_history.append(record)
+        if energy_loss is None:
+            return
+        energy_loss_detached = energy_loss.detach()
+        is_nan = torch.isnan(energy_loss_detached).any().item()
+        if not is_nan:
+            return
+        signature = (stage, int(self.global_step), int(batch_idx))
+        if self._last_energy_nan_signature == signature:
+            return
+        self._write_energy_nan_history(stage)
+        self._last_energy_nan_signature = signature
 
     def forward(self,
                 atoms,
@@ -453,6 +547,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
             rmse_meV = rmse*27.2114*1000
             nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
+            self._track_energy_information(
+                energy_loss=energy_loss,
+                stage="train",
+                identifier=filename,
+                batch_idx=batch_idx,
+                qm9_mol=qm9_mol,
+                predicted_energy=result['energy'],
+                target_energy=target_energy,
+                predicted_density=density,
+                target_density=qm9_density,
+            )
             loss = loss + self.energy_loss_coef * energy_loss
 
         total_loss = loss.detach()
@@ -630,6 +735,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
             rmse_meV = rmse*27.2114*1000
             nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
+            self._track_energy_information(
+                energy_loss=energy_loss,
+                stage="validation",
+                identifier=mol_cd_file,
+                batch_idx=batch_idx,
+                qm9_mol=qm9_mol,
+                predicted_energy=result['energy'],
+                target_energy=target_energy,
+                predicted_density=density,
+                target_density=qm9_density,
+            )
             loss = loss + self.energy_loss_coef * energy_loss
 
         total_loss = loss.detach()
@@ -917,6 +1033,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
             rmse_meV = rmse*27.2114*1000
             nrmse_meV = nrmse*27.2114*1000
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
+            self._track_energy_information(
+                energy_loss=energy_loss,
+                stage="test",
+                identifier=mol_cd_file,
+                batch_idx=batch_idx,
+                qm9_mol=qm9_mol,
+                predicted_energy=result['energy'],
+                target_energy=target_energy,
+                predicted_density=density,
+                target_density=qm9_density,
+            )
             loss = loss + self.energy_loss_coef * energy_loss
         total_loss = loss.detach()
 
