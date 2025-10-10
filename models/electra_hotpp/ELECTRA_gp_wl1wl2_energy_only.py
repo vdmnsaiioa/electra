@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from collections import deque
@@ -20,7 +21,9 @@ import numpy as np
 import torch
 from ase import Atoms
 from ase.data import atomic_numbers, chemical_symbols
+from ase.io.vasp import read_vasp
 from ase.neighborlist import neighbor_list
+import lz4.frame
 from matgl.utils.io import IOMixIn
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
@@ -33,11 +36,28 @@ from models.electra_hotpp.layer import (
 )
 from models.electra_hotpp.model import MiaoMiaoNet, MiaoNet
 from tools.atom_tools import valence_electrons
-from tools.density_conversions import get_qm9_density
 from utils.model_handling import ModelIO
 from utils.train_helper_funcs import load_csv_to_dict, set_optimizer
 
 logger = logging.getLogger(__name__)
+
+def _load_qm9_structure(qm9_path: str) -> Atoms:
+    with lz4.frame.open(qm9_path, mode="rb") as handle:
+        contents = handle.read()
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="qm9_chgcar_", suffix=".chgcar")
+    try:
+        with os.fdopen(tmp_fd, "wb") as tmp_file:
+            tmp_file.write(contents)
+
+        with open(tmp_path, "r", encoding="utf-8", errors="ignore") as file_obj:
+            atoms = read_vasp(file_obj)
+    finally:
+        os.remove(tmp_path)
+
+    if atoms is None:  # pragma: no cover - defensive branch
+        raise ValueError(f"Unable to parse atomic structure from {qm9_path}")
+    return atoms
 
 
 def collate_fn(batch: Iterable[Any]) -> Iterable[Any]:
@@ -71,7 +91,8 @@ class QM9Dataset(Dataset):
             try:
                 if mol_cd_file in self.cache:
                     return self.cache[mol_cd_file]
-                qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict = get_qm9_density(qm9_path)
+                qm9_mol = _load_qm9_structure(qm9_path)
+                qm9_n_elec = valence_electrons(qm9_mol.get_chemical_formula())
                 valid = True
             except Exception as exc:  # pragma: no cover - data robustness
                 logger.warning("Error loading %s: %s", mol_cd_file, exc)
@@ -89,10 +110,10 @@ class QM9Dataset(Dataset):
                 logger.debug("Missing energy metadata for %s: %s", key_no_zeros, exc)
 
         sample = (
-            qm9_density,
+            None,
             qm9_mol,
             qm9_n_elec,
-            qm9_grid_dict,
+            None,
             mol_cd_file,
             None,
             energy,
@@ -135,45 +156,16 @@ class SmallDensityDataset(Dataset):
 
         self.atom_type = self.ATOM_TYPES[mol_name]
         self.atom_coords = np.load(os.path.join(self.data_path, "structures.npy"))
-        self.densities = self._convert_fft(np.load(os.path.join(self.data_path, "dft_densities.npy")))
-        self.grid_coord = self._generate_grid()
-
         energy_file = os.path.join(self.data_path, "energies.npy")
         self.energies = np.load(energy_file) if os.path.isfile(energy_file) else None
 
-    def _convert_fft(self, fft_coeff):
-        logger.info("Precomputing %s density from FFT coefficients ...", self.split)
-        fft_coeff = torch.FloatTensor(fft_coeff).to(torch.complex64)
-        d = fft_coeff.view(-1, self.n_grid, self.n_grid, self.n_grid)
-        hf = self.n_grid // 2
-        d[:, :hf] = (d[:, :hf] - d[:, hf:] * 1j) / 2
-        d[:, hf:] = torch.flip(d[:, 1 : hf + 1], [1]).conj()
-        d = torch.fft.ifft(d, dim=1)
-        d[:, :, :hf] = (d[:, :, :hf] - d[:, :, hf:] * 1j) / 2
-        d[:, :, hf:] = torch.flip(d[:, :, 1 : hf + 1], [2]).conj()
-        d = torch.fft.ifft(d, dim=2)
-        d[..., :hf] = (d[..., :hf] - d[..., hf:] * 1j) / 2
-        d[..., hf:] = torch.flip(d[..., 1 : hf + 1], [3]).conj()
-        d = torch.fft.ifft(d, dim=3)
-        return torch.flip(d.real.view(-1, self.n_grid ** 3), [-1]).detach().view(
-            -1, self.n_grid, self.n_grid, self.n_grid
-        )
-
-    def _generate_grid(self):
-        x = torch.linspace(self.grid_size / self.n_grid, self.grid_size, self.n_grid)
-        return torch.stack(torch.meshgrid(x, x, x, indexing="ij"), dim=-1).view(
-            self.n_grid, self.n_grid, self.n_grid, 3
-        )
-
     def __getitem__(self, item):
         mol = Atoms("".join(self.atom_type), positions=self.atom_coords[item])
-        density = self.densities[item]
-        grid_dict = {"nx": self.n_grid, "ny": self.n_grid, "nz": self.n_grid}
         n_elec = valence_electrons(mol.get_chemical_formula())
 
         energy = float(self.energies[item]) if self.energies is not None else None
 
-        return density, mol, n_elec, grid_dict, None, self.grid_coord, energy
+        return None, mol, n_elec, None, None, None, energy
 
     def __len__(self):
         return self.atom_coords.shape[0]
