@@ -507,7 +507,18 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
             metrics["normalized_l1"] = metrics["nl1"] / atom_count_t
         return energy_loss, metrics, target_energy
 
-    def _log_energy_metrics(self, metrics: dict[str, torch.Tensor], stage: str) -> None:
+    def _log_energy_metrics(
+        self,
+        metrics: dict[str, torch.Tensor],
+        stage: str,
+        batch_size: int | None = None,
+    ) -> None:
+        log_batch_size = (
+            batch_size
+            or self.config.get("real_batch_size")
+            or self.config.get("batch_size")
+            or 1
+        )
         self.log(
             f"{stage.capitalize()} Energy Loss",
             metrics["energy_loss"].detach(),
@@ -515,6 +526,7 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
             on_epoch=True,
             prog_bar=True,
             logger=True,
+            batch_size=log_batch_size,
         )
         if "rmse" in metrics:
             self.log(
@@ -524,6 +536,7 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
+                batch_size=log_batch_size,
             )
         if "normalized_rmse" in metrics:
             self.log(
@@ -533,6 +546,7 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
+                batch_size=log_batch_size,
             )
         if "normalized_l1" in metrics:
             self.log(
@@ -542,6 +556,7 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
+                batch_size=log_batch_size,
             )
 
     def training_step(self, batch, batch_idx: int):
