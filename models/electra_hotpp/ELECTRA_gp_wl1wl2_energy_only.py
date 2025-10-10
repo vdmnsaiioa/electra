@@ -41,6 +41,8 @@ from utils.train_helper_funcs import load_csv_to_dict, set_optimizer
 
 logger = logging.getLogger(__name__)
 
+HARTREE_TO_MEV = 27.2114 * 1000
+
 def _load_qm9_structure(qm9_path: str) -> Atoms:
     with lz4.frame.open(qm9_path, mode="rb") as handle:
         contents = handle.read()
@@ -499,12 +501,14 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
         metrics = {
             "energy_loss": energy_loss,
             "rmse": rmse,
+            "rmse_mev": rmse * HARTREE_TO_MEV,
             "nl1": torch.abs(predicted - target_energy),
         }
         if atom_count is not None:
             atom_count_t = torch.tensor(atom_count, dtype=predicted.dtype, device=predicted.device)
             metrics["normalized_rmse"] = rmse / atom_count_t
             metrics["normalized_l1"] = metrics["nl1"] / atom_count_t
+            metrics["normalized_rmse_mev"] = metrics["normalized_rmse"] * HARTREE_TO_MEV
         return energy_loss, metrics, target_energy
 
     def _log_energy_metrics(
@@ -519,6 +523,8 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
             or self.config.get("batch_size")
             or 1
         )
+        stage_titles = {"train": "Train", "val": "Validation", "test": "Test"}
+        stage_title = stage_titles.get(stage, stage.capitalize())
         self.log(
             f"{stage.capitalize()} Energy Loss",
             metrics["energy_loss"].detach(),
@@ -558,6 +564,26 @@ class ELECTRAEnergyOnly(L.LightningModule, IOMixIn):
                 logger=True,
                 batch_size=log_batch_size,
             )
+        if self.config.get("wandb"):
+            import wandb
+
+            def _to_float(value: torch.Tensor | float | int) -> float:
+                if isinstance(value, torch.Tensor):
+                    detached = value.detach()
+                    if detached.numel() == 1:
+                        return float(detached.cpu().item())
+                    return float(detached.mean().cpu().item())
+                return float(value)
+
+            wandb_metrics: dict[str, float] = {}
+            if "rmse_mev" in metrics:
+                wandb_metrics[f"{stage_title} Energy RMSE in meV"] = _to_float(metrics["rmse_mev"])
+            if "normalized_rmse_mev" in metrics:
+                wandb_metrics[f"{stage_title} Energy NRMSE in meV"] = _to_float(metrics["normalized_rmse_mev"])
+            if "normalized_l1" in metrics:
+                wandb_metrics[f"{stage_title} Energy NL1"] = _to_float(metrics["normalized_l1"])
+            if wandb_metrics:
+                wandb.log(wandb_metrics)
 
     def training_step(self, batch, batch_idx: int):
         _, qm9_mol, identifier, energy, atom_count = self._unpack_batch(batch)
