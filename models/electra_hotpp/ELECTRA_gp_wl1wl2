@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-
+import uuid
 import wandb
 import logging
 from tools.atom_tools import valence_electrons
@@ -119,9 +119,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             )
          # Network for predicting molecular energy from scalar features
         self.phi_network = nn.Sequential(
-            nn.Linear(5 * self.units, self.units * 4),
+            nn.Linear(4 * self.units, self.units * 3),
             nn.Tanh(), # changed from minsh
-            nn.Linear(self.units * 4, self.units),
+            nn.Linear(self.units * 3, self.units),
         )
         self.rho_network = nn.Sequential(
             nn.Linear(self.units, self.units),
@@ -133,7 +133,18 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #self.energy_loss_fn = self.normalized_l1_loss
         self.energy_loss_coef = config.get("energy_loss_coef")
         self.energy_loss_history: deque[dict] = deque(maxlen=20)
-        self.energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
+        base_energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
+        log_dir, log_filename = os.path.split(base_energy_nan_log_path)
+        name, ext = os.path.splitext(log_filename)
+        unique_suffix = uuid.uuid4().hex[:8]
+        if name:
+            new_filename = f"{name}_{unique_suffix}{ext}"
+        else:
+            new_filename = f"{unique_suffix}{ext}"
+        if log_dir:
+            self.energy_nan_log_path = os.path.join(log_dir, new_filename)
+        else:
+            self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
 
     @staticmethod
@@ -395,7 +406,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         input_l0l1l2 = torch.cat((input_l0l1, det_scal, det_vec, det_tens), dim=-1) # needs 8 on energy
 
         #norm_energy_input = self.energy_layer_norm(energy_input)
-        phi_out = self.phi_network(input_l0l1)
+        phi_out = self.phi_network(input_l0)
         pooled = phi_out.sum(dim=0)
         energy = self.rho_network(pooled).squeeze(-1)
         
