@@ -21,15 +21,11 @@ import plotly.io as pio
 from matgl.utils.io import IOMixIn
 from torch import nn
 import ase
-from models.dists import gto, get_full_grid_dens, get_n_points_dens, get_n_points_dens_single
 from tools.ase_converter import Atoms2Graph
-from modules.grid2pos import grid2pos
-from tools.density_conversions import normalize_density, cd_to_chgcar_mat, cd_to_chgcar_mol, get_qm9_density
+from tools.density_conversions import get_qm9_density
 from tools.graph_tools import CollateFuncAtoms
 from utils.train_helper_funcs import set_optimizer, load_csv_to_dict
-from modules.loss import DensityLoss
 import os
-from tools.visualization import create_chg_delta
 import lightning as L
 from models.electra_hotpp.layer import AtomicEmbedding, BesselPoly, PolynomialCutoff, AufbauEmbedding
 from models.electra_hotpp.model import MiaoNet, MiaoMiaoNet
@@ -53,8 +49,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         super().__init__()
 
         self.save_args(locals(), kwargs)
-        self.loss = DensityLoss(config=config,
-                                device=self.device)
         self.activation_type = config['activation_type']
         self.gaus_per_electrons = config['gaus_per_electrons']
         self.units = self.gaus_per_electrons
@@ -147,6 +141,81 @@ class ELECTRA(L.LightningModule, IOMixIn):
             self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
 
+    def init_hotpp_model(self) -> None:
+        """Initialise the HOTPP backbone responsible for feature generation."""
+        elements = ['H', 'O', 'C', 'N', 'F', 'Cl', 'Br', 'I']
+        element_numbers = [atomic_numbers[element] for element in elements]
+
+        embed_type = self.config.get('embed_type', 'atomic')
+        if embed_type == 'aufbau':
+            emb_layer = AufbauEmbedding(
+                element_numbers,
+                self.config['master_units'],
+                device=self.device,
+            )
+        elif embed_type == 'atomic':
+            emb_layer = AtomicEmbedding(
+                element_numbers,
+                self.config['master_units'],
+            )
+        else:
+            raise ValueError(f"Unsupported embedding type: {embed_type}")
+
+        emb_layer.to(self.device)
+        self.emb_layer = emb_layer
+
+        cut_fn = PolynomialCutoff(
+            cutoff=self.config['hotpp_cutoff'],
+            p=self.config['poly_order'],
+        )
+        radial_fn = BesselPoly(
+            r_max=self.config['hotpp_cutoff'],
+            n_max=self.config['master_units'],
+            cutoff_fn=cut_fn,
+        )
+
+        nlayers = self.config['hotpp_nlayers']
+        if self.config['miaonet'] == "miaomiao":
+            self.base_model = MiaoMiaoNet(
+                embedding_layer=emb_layer,
+                radial_fn=radial_fn,
+                n_layers=nlayers,
+                max_n_body=[self.config['n_max']] * nlayers,
+                max_r_way=[self.config['r_max']] * nlayers,
+                max_out_way=[self.config['out_max']] * nlayers,
+                max_out_heads=self.config['max_out_heads'],
+                output_dim=[self.config['hotpp_outdim']] * nlayers,
+                activate_fn=self.config['activation_type'],
+                head_activate_list=self.config['head_activate_list'],
+                mean=0.,
+                std=1.,
+                norm_factor=1.,
+                bilinear=False,
+                norm_heads=self.config['norm_heads'],
+                norm_blocks=self.config['norm_blocks'],
+                conv_mode=self.config['conv_mode'],
+                update_edge=self.config['update_edge'],
+                prune=self.config['prune'],
+            )
+        else:
+            self.base_model = MiaoNet(
+                embedding_layer=emb_layer,
+                radial_fn=radial_fn,
+                n_layers=nlayers,
+                max_r_way=[self.config['r_max']] * nlayers,
+                max_out_way=[self.config['out_max']] * nlayers,
+                max_out_heads=self.config['max_out_heads'],
+                output_dim=[self.config['hotpp_outdim']] * nlayers,
+                activate_fn=self.config['activation_type'],
+                head_activate_list=self.config['head_activate_list'],
+                mean=0.,
+                std=1.,
+                norm_factor=1.,
+                bilinear=False,
+                conv_mode=self.config['conv_mode'],
+                update_edge=self.config['update_edge'],
+            )
+
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """Compute mean absolute percentage error between prediction and target.
@@ -166,23 +235,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             base = os.path.basename(identifier)
             return base.split(".")[0]
         return f"batch_{batch_idx}"
-
-    @staticmethod
-    def _serialize_tensor(tensor: torch.Tensor | np.ndarray | None) -> dict | None:
-        if tensor is None:
-            return None
-        if isinstance(tensor, torch.Tensor):
-            cpu_tensor = tensor.detach().cpu()
-            return {
-                "shape": list(cpu_tensor.shape),
-                "values": cpu_tensor.reshape(-1).tolist(),
-            }
-        if isinstance(tensor, np.ndarray):
-            return {
-                "shape": list(tensor.shape),
-                "values": tensor.reshape(-1).tolist(),
-            }
-        return {"value": tensor}
 
     @staticmethod
     def _serialize_energy(value: torch.Tensor | float | int | None):
@@ -221,8 +273,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         qm9_mol: Atoms | None,
         predicted_energy: torch.Tensor | None,
         target_energy: torch.Tensor | float | None,
-        predicted_density: torch.Tensor | None,
-        target_density: torch.Tensor | np.ndarray | None,
     ) -> None:
         if predicted_energy is None or target_energy is None:
             return
@@ -234,8 +284,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             "molecular_formula": qm9_mol.get_chemical_formula() if qm9_mol is not None else None,
             "predicted_energy": self._serialize_energy(predicted_energy),
             "target_energy": self._serialize_energy(target_energy),
-            "predicted_density": self._serialize_tensor(predicted_density),
-            "target_density": self._serialize_tensor(target_density),
         }
         self.energy_loss_history.append(record)
         if energy_loss is None:
@@ -460,1004 +508,293 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def training_step(self,
                       batch,
                       batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
-        energy = rest[0] if len(rest) > 0 else None
-        atom_count = rest[1] if len(rest) > 1 else None
+        (
+            _,
+            qm9_mol,
+            qm9_n_elec,
+            _,
+            mol_cd_file,
+            _,
+            energy,
+            atom_count,
+        ) = batch[0]
 
         molecule_formula = qm9_mol.get_chemical_formula()
         print(f"[Train] Step {batch_idx}: {molecule_formula}")
 
-        if pos_grid is None:
-            pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
-            pos_grid = pos_grid.to(self.device)
-        atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
-        start = time.time()
         result = self(qm9_mol, n_elec=qm9_n_elec)
-        cell = result['cell']
-        weights = result['weights']
-        pos_disp = result['pos_disp']
-        image_weights = result['image_weights']
-        X = result['cov']
-        scalar_mults = result['scal_mults']
-        n_multiples = result['n_multiples']
-        if not self.config['negative_contributions']:
-            scalar_mults = None
-        weights = weights.reshape(weights.shape[0], 1, 1)
+        predicted_energy = result["energy"]
 
-        n_multiples = n_multiples.to(self.device)
-        atom_positions = atom_positions.to(self.device)
-        atom_positions = atom_positions.reshape(n_multiples.shape[0], -1)
-        pos_tens_orig = atom_positions.repeat_interleave(n_multiples, 0).view(-1, 3)
-        pos_tens_orig = pos_tens_orig.to(self.device)
-        gaus_pos = pos_tens_orig + pos_disp
+        if energy is None:
+            raise ValueError("Training batch is missing target energy.")
 
-        sys_dist = gto(
-            pos=atom_positions,
-            pos_disp=pos_disp,
-            cov=X,
-            scales=weights,
-            scalar_mults=scalar_mults,
-            n_multiples=n_multiples,
-            relu=self.config['relu'],
-            cell = cell,
-            device=self.device,
-            image_weights=image_weights)
-        if not self.config['train_sample_all']:
-            density, sampled_points = get_n_points_dens(atom_dist=sys_dist,
-                                                        pos_grid=pos_grid,
-                                                        gaus_pos=gaus_pos,
-                                                        n_multiples=result['n_multiples'],
-                                                        n_points=self.config['n_train_points'],
-                                                        sample_all=self.config['train_sample_all'],
-                                                        cell = cell)
-        else:
-            if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
-                density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                               pos_grid=pos_grid,
-                                               gaus_pos=gaus_pos,
-                                               n_multiples=result['n_multiples'],
-                                               n_points=self.config['n_split_points'],
-                                               sample_all=True,
-                                               cell = cell)
-            else:
-                density = get_full_grid_dens(atom_dist=sys_dist,
-                                             gaus_pos=gaus_pos,
-                                             n_multiples=result['n_multiples'],
-                                             pos_grid=pos_grid)
-            sampled_points = None
-        if self.config['relu']:
-            density = torch.relu(density)
-        if self.config['MD_Data']:
-            mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3
-        else:
-            mol_volume = None
-        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                   density=density,
-                                                   qm9_density=qm9_density,
-                                                   grid_dict=qm9_grid_dict,
-                                                   sys=qm9_mol,
-                                                   points=sampled_points,
-                                                   mol_volume=mol_volume)
-        end = time.time()
-        if self.config['wandb']:
-            wandb.log({"Full Inference Time TRAIN": end - start})
-        else:
-            print("Full Inference Time TRAIN: ", end - start)
-        loss, dens_error = self.loss.compute_total_loss(
-            sys=qm9_mol,
-            pred_cd=density,
-            true_cd_tens=qm9_density,
-            grid_dict=qm9_grid_dict,
-            n_valence_electrons=n_val_elec,
-            sampled_points=sampled_points,
-            training=True,
-            mol_volume=mol_volume,
+        target_energy = torch.tensor(
+            energy,
+            dtype=predicted_energy.dtype,
+            device=predicted_energy.device,
         )
 
-        energy_loss = None
-        rmse = None
-        nrmse = None
-        nl1 = None
-        print(filename)
-        if energy is None:
-            print('not good')
-        if energy is not None and atom_count is not None:
-            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
-            try:
-                energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            except Exception as e:
-                print(e)
-            energy_loss = energy_mse
-            
-            norm_energy_loss = energy_loss / atom_count_t
-            
-            rmse = torch.sqrt(energy_mse)
-            nrmse = rmse / atom_count_t
-            print(rmse,'thats rmse brah')
-            #rmse_meV = rmse*27.2114*1000
-            print(result['energy'],'predicted energy')
-            print(target_energy,'target energy')
-            #rmse_meV = nrmse*27.2114*1000
-            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=energy_loss,
-                stage="train",
-                identifier=filename,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
+        base_mse = self.energy_loss_fn(predicted_energy, target_energy)
+        loss = (
+            base_mse if self.energy_loss_coef is None
+            else self.energy_loss_coef * base_mse
+        )
+
+        rmse = torch.sqrt(base_mse)
+        atom_count_t = None
+        if atom_count is not None:
+            atom_count_t = torch.tensor(
+                atom_count,
+                dtype=predicted_energy.dtype,
+                device=predicted_energy.device,
             )
-            loss = loss + self.energy_loss_coef * energy_loss
 
-        total_loss = loss.detach()
+        self._track_energy_information(
+            energy_loss=base_mse,
+            stage="train",
+            identifier=mol_cd_file,
+            batch_idx=batch_idx,
+            qm9_mol=qm9_mol,
+            predicted_energy=predicted_energy,
+            target_energy=target_energy,
+        )
 
-        np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
-        if self.config['crystal']:
-            cell = qm9_mol.get_cell()
-            cell_t = torch.tensor(cell, dtype=torch.float, device=self.device)  # shape (3,3)
-            tol = 1e-8
-            diag = torch.diag(torch.diagonal(cell_t))
-            offdiag = (cell_t - diag).abs().max()
-            is_ortho = offdiag < tol
-            if self.config['hpc']:
-                if is_ortho:
-                    wandb.log({"Orthogonal error %": np_err})
-                else:
-                    wandb.log({"Non-orthogonal error %": np_err})
-            else:
-                if is_ortho:
-                    print("Orthogonal error %: ", np_err)
-                else:
-                    print("Non-orthogonal error %: ", np_err)
+        self.log(
+            "Train Energy Loss",
+            loss.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=1,
+        )
+        self.log(
+            "Train Energy RMSE",
+            rmse.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
 
-        self.log("Train Density Err calu %",
-                 np.round(100 * dens_error.detach().cpu().numpy(), 3),
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-        print(energy_loss, ': energy loss')
-        if rmse is not None:
-            self.log("Train Energy RMSE",
-                      rmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy NRMSE",
-                      nrmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy NL1",
-                      nl1.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            
-        self.log("Train Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
-        
-        if self.config['hpc']:
-            wandb_dict = {
-                "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
-                "Train Total Loss bleadi": float(total_loss.cpu().numpy())
-            }
-            
-            #wandb_dict["Train Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-            #wandb_dict["Train Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-            wandb_dict["Train Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
+        if atom_count_t is not None:
+            nrmse = rmse / atom_count_t
+            nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
+            self.log(
+                "Train Energy NRMSE",
+                nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
+            self.log(
+                "Train Energy NL1",
+                nl1.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
 
-        if batch_idx < self.config['n_warmups']:
-            self.optimizers().optimizer.param_groups[0]['lr'] = self.config['final_lr'] *((batch_idx+1)/self.config['n_warmups'])
-        return energy_loss
+        return loss
 
     def validation_step(self,
                         batch,
                         batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
-        energy = rest[0] if len(rest) > 0 else None
-        atom_count = rest[1] if len(rest) > 1 else None
+        (
+            _,
+            qm9_mol,
+            qm9_n_elec,
+            _,
+            mol_cd_file,
+            _,
+            energy,
+            atom_count,
+        ) = batch[0]
 
         molecule_formula = qm9_mol.get_chemical_formula()
         print(f"[Validation] Step {batch_idx}: {molecule_formula}")
 
-        if pos_grid is None:
-            pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
-            pos_grid = pos_grid.to(self.device)
-        atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
-        start = time.time()
         result = self(qm9_mol, n_elec=qm9_n_elec)
-        cell = result['cell']
-        weights = result['weights']
-        pos_disp = result['pos_disp']
-        image_weights = result['image_weights']
-        X = result['cov']
-        scalar_mults = result['scal_mults']
-        n_multiples = result['n_multiples']
-        if not self.config['negative_contributions']:
-            scalar_mults = None
-        weights = weights.reshape(weights.shape[0], 1, 1)
+        predicted_energy = result["energy"]
 
-        n_multiples = n_multiples.to(self.device)
-        atom_positions = atom_positions.to(self.device)
-        atom_positions = atom_positions.reshape(n_multiples.shape[0], -1)
-        pos_tens_orig = atom_positions.repeat_interleave(n_multiples, 0).view(-1, 3)
-        pos_tens_orig = pos_tens_orig.to(self.device)
-        gaus_pos = pos_tens_orig + pos_disp
+        if energy is None:
+            raise ValueError("Validation batch is missing target energy.")
 
-        sys_dist = gto(
-            pos=atom_positions,
-            pos_disp=pos_disp,
-            cov=X,
-            scales=weights,
-            scalar_mults=scalar_mults,
-            n_multiples=result['n_multiples'],
-            relu=self.config['relu'],
-            cell = cell,
-            device=self.device,
-            image_weights=image_weights)
-        if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
-            density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                               pos_grid=pos_grid,
-                                               gaus_pos=gaus_pos,
-                                               n_multiples=result['n_multiples'],
-                                               n_points=self.config['n_split_points'],
-                                               sample_all=True,
-                                               cell = cell)
-        else:
-            density = get_full_grid_dens(atom_dist=sys_dist,
-                                         gaus_pos=gaus_pos,
-                                         n_multiples=result['n_multiples'],
-                                         pos_grid=pos_grid)
-        sampled_points = None
-        density = torch.relu(density)
-        if self.config['MD_Data']:
-            mol_volume = (BOHR_TO_ANGSTROM*20.0)**3
-        else:
-            mol_volume = None
-        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                   density=density,
-                                                   qm9_density=qm9_density,
-                                                   grid_dict=qm9_grid_dict,
-                                                   sys=qm9_mol,
-                                                   points=sampled_points,
-                                                   mol_volume=mol_volume)
-        end = time.time()
-        if self.config['wandb']:
-            if wandb.run is not None:
-                wandb.log({"Full Inference Time VAL": end - start})
-        else:
-            print("Full Inference Time VAL:", end - start)
-
-        loss, density_error = self.loss.compute_total_loss(
-            sys=qm9_mol,
-            pred_cd=density,
-            true_cd_tens=qm9_density,
-            grid_dict=qm9_grid_dict,
-            n_valence_electrons=n_val_elec,
-            sampled_points=sampled_points,
-            training=False,
-            mol_volume=mol_volume
+        target_energy = torch.tensor(
+            energy,
+            dtype=predicted_energy.dtype,
+            device=predicted_energy.device,
         )
 
-        energy_loss = None
-        rmse = None
-        nrmse = None
-        nl1 = None
-        if energy is not None and atom_count is not None:
-            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
-            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = energy_mse
-            norm_energy_loss = energy_loss / atom_count_t
-            rmse = torch.sqrt(energy_mse)
-            nrmse = rmse / atom_count_t
-        #rmse_meV = rmse*27.2114*1000
-            #rmse_meV = nrmse*27.2114*1000
-            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=energy_loss,
-                stage="validation",
-                identifier=mol_cd_file,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
+        base_mse = self.energy_loss_fn(predicted_energy, target_energy)
+        loss = (
+            base_mse if self.energy_loss_coef is None
+            else self.energy_loss_coef * base_mse
+        )
+
+        rmse = torch.sqrt(base_mse)
+        atom_count_t = None
+        if atom_count is not None:
+            atom_count_t = torch.tensor(
+                atom_count,
+                dtype=predicted_energy.dtype,
+                device=predicted_energy.device,
             )
-            loss = loss + self.energy_loss_coef * energy_loss
 
-        total_loss = loss.detach()
+        self._track_energy_information(
+            energy_loss=base_mse,
+            stage="validation",
+            identifier=mol_cd_file,
+            batch_idx=batch_idx,
+            qm9_mol=qm9_mol,
+            predicted_energy=predicted_energy,
+            target_energy=target_energy,
+        )
 
-        np_err = np.round(100 * density_error.detach().cpu().numpy(), 3)
-        self.log("Validation Density Err %",
-                 np_err,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-        
-        self.log("Validation Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
-        if rmse is not None:
-            self.log("Validation Energy RMSE",
-                      rmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy NRMSE",
-                      nrmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy NL1",
-                      nl1.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-        if self.config['hpc']:
-            wandb_dict = {"Validation Density Err %": np_err,
-                          "Validation Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                #wandb_dict["Validation Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                #wandb_dict["Validation Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                wandb_dict["Validation Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
+        self.log(
+            "Validation Energy Loss",
+            loss.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=1,
+        )
+        self.log(
+            "Validation Energy RMSE",
+            rmse.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
 
-        if batch_idx == 0 and self.config['save_model']:
-            self.model_handler.save(self)
+        if atom_count_t is not None:
+            nrmse = rmse / atom_count_t
+            nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
+            self.log(
+                "Validation Energy NRMSE",
+                nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
+            self.log(
+                "Validation Energy NL1",
+                nl1.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
 
-        if self.config['construct_val_cd'] and batch_idx % 100 == 0:
-            construct = True
-            if construct:
-                qm9_path = os.path.join(self.qm9_dens_path, mol_cd_file)
-                id = mol_cd_file.split("/")[-1]
-                id_no_ending = id.split(".")[0]
-                filename = f'{self.pred_dens_path_val}{id_no_ending}_{qm9_mol.get_chemical_formula()}_val_{batch_idx}.CHGCAR'
-                name_iter_str = f'{id_no_ending}_{qm9_mol.get_chemical_formula()}_val_{batch_idx}'
-                if self.config["crystal"]:
-                    type = "crystal"
-                    cd_to_chgcar_mat(original_file=qm9_path,
-                                     atoms=qm9_mol,
-                                     cd=density.detach().cpu().numpy(),
-                                     filename=filename)
-                else:
-                    type = "mol"
-                    cd_to_chgcar_mol(atoms=qm9_mol,
-                                 cd=density.detach().cpu().numpy(),
-                                 filename=filename)
-
-                create_chg_delta(
-                    pred_dens_file=filename,
-                    true_dens_file=qm9_path,
-                    delta_folder=self.density_delta_path_val,
-                    name_iter_str=name_iter_str,
-                    type=type
-                )
-                if self.plot_gaus_pos:
-                    pos = atom_positions.reshape(result['n_multiples'].shape[0], -1)
-                    pos = pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
-                    gaus_pos = pos_disp + pos
-                    origin_atoms = qm9_mol.get_chemical_symbols()
-                    origin_atoms = np.repeat(origin_atoms, result['n_multiples'].detach().cpu().numpy())
-                    pos_id = str(qm9_mol.positions[0])
-                    if self.config['crystal']:
-                        file_id = f"{self.gaus_pos_path_val}{id_no_ending}_iter_{self.val_iter}_{qm9_mol.get_chemical_formula()}_ERR_{np_err}.html"
-                    else:
-                        file_id = f"{self.gaus_pos_path_val}{id_no_ending}_iter_{self.val_iter}_{qm9_mol.get_chemical_formula()}_ERR_{np_err}.html"
-                    self.plot_gaussian_positions(atom_types=qm9_mol.get_chemical_symbols(),
-                                             scal_mults=scalar_mults,
-                                             weights=weights,
-                                             atom_positions=atom_positions,
-                                             gaus_positions=gaus_pos,
-                                             origin_atoms=origin_atoms,
-                                             origin_pos=pos,
-                                             covariance_matrices=X,
-                                             filename=file_id,
-                                             simple=self.simple_gaus
-                                             )
-        if batch_idx == 0:
-            self.val_iter += 1
-
-        return energy_loss
-
-    def predict_step(self,
-                     batch,
-                     batch_idx: int,
-                     atom_types: list[int] = None,
-                     atom_idxs: list[int] = None):
-        """atom_types can be a list of atom types to predict the density for, e.g. [1,6] if only Hydrogen and Carbon.
-        If None, all atoms are considered.
-        atom_idxs can be a list of atom indices to predict the density for, e.g. [0,1,2] if only the first three atoms."""
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, *_ = batch[0]
-
-        pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
-        pos_grid = pos_grid.to(self.device)
-
-        atoms_list = self.collate_func([qm9_mol])
-        n_atoms = len(atoms_list['atom_xyz'][0])
-
-        g, lat, state_attr = self.g_converter.get_graph(qm9_mol)
-
-        g.ndata["pos"] = atoms_list['atom_xyz'][0]
-        g.edata["pbc_offshift"] = torch.matmul(g.edata["pbc_offset"], lat[0])
-        g.ndata['atom_numbers'] = atoms_list['nodes'][0]
-        atom_positions = g.ndata["pos"]
-        atom_positions = atom_positions.to(self.device)
-
-        result = self(qm9_mol, n_elec=qm9_n_elec)
-
-        weights = result['weights']
-        pos_disp = result['pos_disp']
-        X = result['cov']
-        cell = result['cell']
-        scalar_mults = result['scal_mults']
-        scales_all_atoms = weights.reshape(weights.shape[0], 1, 1)
-
-        if atom_types is not None:
-            mask = torch.zeros_like(n_atoms * self.units, dtype=torch.bool)
-            for i, type in enumerate(g.ndata['atom_numbers']):
-                if type in atom_types:
-                    mask[i * self.units:(i + 1) * self.units] = True
-        elif atom_idxs is not None:
-            mask = torch.zeros_like(n_atoms * self.units, dtype=torch.bool)
-            for i in range(n_atoms):
-                if i in atom_idxs:
-                    mask[i * self.units:(i + 1) * self.units] = True
-        else:
-            mask = None
-
-        sys_dist = gto(
-            pos=atoms_list['atom_xyz'],
-            pos_disp=pos_disp,
-            cov=X,
-            scales=scales_all_atoms,
-            scalar_mults=scalar_mults,
-            n_multiples=result['n_multiples'],
-            device=self.device,
-            relu=self.config['relu'],
-            cell = cell,
-            mask=mask)
-
-        if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
-            density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                               pos_grid=pos_grid,
-                                               gaus_pos=gaus_pos,
-                                               n_multiples=result['n_multiples'],
-                                               n_points=self.config['n_split_points'],
-                                               sample_all=True,
-                                               cell = cell)
-        else:
-            density = get_full_grid_dens(atom_dist=sys_dist,
-                                         atom_positions=atom_positions,
-                                         n_multiples=result['n_multiples'],
-                                         pos_grid=pos_grid)
-        sampled_points = None
-        if self.config['relu']:
-            density = torch.relu(density)
-        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                   density=density,
-                                                   qm9_density=qm9_density,
-                                                   grid_dict=qm9_grid_dict,
-                                                   sys=qm9_mol,
-                                                   points=sampled_points)
-        return density
+        return loss
 
     def test_step(self,
-                        batch,
-                        batch_idx: int):
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, mol_cd_file, pos_grid, *rest = batch[0]
-        energy = rest[0] if len(rest) > 0 else None
-        atom_count = rest[1] if len(rest) > 1 else None
+                     batch,
+                     batch_idx: int):
+        (
+            _,
+            qm9_mol,
+            qm9_n_elec,
+            _,
+            mol_cd_file,
+            _,
+            energy,
+            atom_count,
+        ) = batch[0]
 
         molecule_formula = qm9_mol.get_chemical_formula()
         print(f"[Test] Step {batch_idx}: {molecule_formula}")
 
-        if pos_grid is None:
-            pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
-            pos_grid = pos_grid.to(self.device)
-        atom_positions = torch.tensor(qm9_mol.positions, self.device)
-        start = time.time()
         result = self(qm9_mol, n_elec=qm9_n_elec)
-        cell = result['cell']
-        weights = result['weights']
-        pos_disp = result['pos_disp']
-        image_weights = result['image_weights']
-        X = result['cov']
-        scalar_mults = result['scal_mults']
-        n_multiples = result['n_multiples']
-        if not self.config['negative_contributions']:
-            scalar_mults = None
-        weights = weights.reshape(weights.shape[0], 1, 1)
+        predicted_energy = result["energy"]
 
-        n_multiples = n_multiples.to(self.device)
-        atom_positions = atom_positions.to(self.device)
-        atom_positions = atom_positions.reshape(n_multiples.shape[0], -1)
-        pos_tens_orig = atom_positions.repeat_interleave(n_multiples, 0).view(-1, 3)
-        pos_tens_orig = pos_tens_orig.to(self.device)
-        gaus_pos = pos_tens_orig + pos_disp
+        if energy is None:
+            raise ValueError("Test batch is missing target energy.")
 
-        sys_dist = gto(
-            pos=atom_positions,
-            pos_disp=pos_disp,
-            cov=X,
-            scales=weights,
-            scalar_mults=scalar_mults if self.config['negative_contributions'] else None,
-            n_multiples=result['n_multiples'],
-            relu=self.config['relu'],
-            cell = cell,
-            device=self.device,
-            image_weights=image_weights)
-
-        density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                       pos_grid=pos_grid,
-                                       gaus_pos=gaus_pos,
-                                       n_multiples=result['n_multiples'],
-                                       n_points=self.config['n_split_points'],
-                                       sample_all=True,
-                                       cell=cell)
-
-        sampled_points = None
-        if self.config['relu']:
-            density = torch.relu(density)
-        if self.config['MD_Data']:
-            mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3
-        else:
-            mol_volume = None
-        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                   density=density,
-                                                   qm9_density=qm9_density,
-                                                   grid_dict=qm9_grid_dict,
-                                                   sys=qm9_mol,
-                                                   points=sampled_points,
-                                                   mol_volume=mol_volume)
-        end = time.time()
-
-        if self.config['wandb']:
-            wandb.log({"Full Inference Time TEST": end - start})
-        else:
-            print("Full Inference Time TEST: ", end - start)
-        loss, density_error = self.loss.compute_total_loss(
-            sys=qm9_mol,
-            pred_cd=density,
-            true_cd_tens=qm9_density,
-            grid_dict=qm9_grid_dict,
-            n_valence_electrons=n_val_elec,
-            sampled_points=sampled_points,
-            training=False,
-            mol_volume=mol_volume,
+        target_energy = torch.tensor(
+            energy,
+            dtype=predicted_energy.dtype,
+            device=predicted_energy.device,
         )
 
-        energy_loss = None
-        rmse = None
-        nrmse = None
-        nl1 = None
-        if energy is not None and atom_count is not None:
-            target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
-            atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
-            energy_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = energy_mse
+        base_mse = self.energy_loss_fn(predicted_energy, target_energy)
+        loss = (
+            base_mse if self.energy_loss_coef is None
+            else self.energy_loss_coef * base_mse
+        )
 
-            norm_energy_loss = energy_loss / atom_count_t
-            rmse = torch.sqrt(energy_mse)
+        rmse = torch.sqrt(base_mse)
+        atom_count_t = None
+        if atom_count is not None:
+            atom_count_t = torch.tensor(
+                atom_count,
+                dtype=predicted_energy.dtype,
+                device=predicted_energy.device,
+            )
+
+        self._track_energy_information(
+            energy_loss=base_mse,
+            stage="test",
+            identifier=mol_cd_file,
+            batch_idx=batch_idx,
+            qm9_mol=qm9_mol,
+            predicted_energy=predicted_energy,
+            target_energy=target_energy,
+        )
+
+        self.log(
+            "Test Energy Loss",
+            loss.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=1,
+        )
+        self.log(
+            "Test Energy RMSE",
+            rmse.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
+
+        if atom_count_t is not None:
             nrmse = rmse / atom_count_t
-        #rmse_meV = rmse*27.2114*1000
-            #rmse_meV = nrmse*27.2114*1000
-            nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=energy_loss,
-                stage="test",
-                identifier=mol_cd_file,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
+            nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
+            self.log(
+                "Test Energy NRMSE",
+                nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
             )
-            loss = loss + self.energy_loss_coef * energy_loss
-        total_loss = loss.detach()
-
-        np_err = np.round(100 * density_error.detach().cpu().numpy(),3)
-        self.log("Test Density Err %",
-                 np_err,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-        
-        self.log("Test Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
-        
-        if rmse is not None:
-            self.log("Test Energy RMSE",
-                     rmse.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy NRMSE",
-                     nrmse.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy NL1",
-                     nl1.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-
-        if self.config['hpc']:
-            wandb.log({"Test Density Err %": np_err})
-            wandb_dict = {"Test Density Err %": np_err,
-                          "Test Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                #wandb_dict["Test Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                #wandb_dict["Test Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                wandb_dict["Test Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
-
-        if self.config['construct_test_cd'] and batch_idx % 100 == 0:
-            qm9_path = os.path.join(self.qm9_dens_path, mol_cd_file)
-            filename = f'{self.pred_dens_path_val}{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}_test_{batch_idx}.CHGCAR'
-            name_iter_str = f'{mol_cd_file[-17:-11]}_{qm9_mol.get_chemical_formula()}_test_{batch_idx}'
-            if self.config["crystal"]:
-                type = "crystal"
-                cd_to_chgcar_mat(original_file=qm9_path,
-                                 atoms=qm9_mol,
-                                 cd=density.detach().cpu().numpy(),
-                                 filename=filename)
-            else:
-                type = "mol"
-                cd_to_chgcar_mol(atoms=qm9_mol,
-                                 cd=density.detach().cpu().numpy(),
-                                 filename=filename)
-            create_chg_delta(
-                pred_dens_file=filename,
-                true_dens_file=qm9_path,
-                delta_folder=self.density_delta_path_test,
-                name_iter_str=name_iter_str,
-                type=type
+            self.log(
+                "Test Energy NL1",
+                nl1.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
             )
-            if self.plot_gaus_pos:
-                pos = atom_positions.reshape(result['n_multiples'].shape[0], -1)
-                pos = pos.repeat_interleave(result['n_multiples'], 0).view(-1, 3)
-                gaus_pos = pos_disp + pos
-                origin_atoms = qm9_mol.get_chemical_symbols()
-                origin_atoms = np.repeat(origin_atoms, result['n_multiples'].detach().cpu().numpy())
-                file_id = f"{self.gaus_pos_path_test}{mol_cd_file[-17:-11]}_iter_{batch_idx}_{qm9_mol.get_chemical_formula()}_ERR_{np_err}.html"
-                self.plot_gaussian_positions(atom_types=qm9_mol.get_chemical_symbols(),
-                                             scal_mults=scalar_mults if self.config['negative_contributions'] else None,
-                                             weights=weights,
-                                             atom_positions=atom_positions,
-                                             gaus_positions=gaus_pos,
-                                             origin_atoms=origin_atoms,
-                                             origin_pos=pos,
-                                             covariance_matrices=X,
-                                             filename=file_id,
-                                             simple=self.simple_gaus
-                                             )
-        return energy_loss
 
-    def eq_check_prediction(self,
-                batch,
-                 r_mat = None,
-                translation = None,
-                inversion = False):
-
-        qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, *_ = batch[0]
-        qm9_mol.pbc = False
-        pos_grid = grid2pos(qm9_mol, qm9_grid_dict).to(self.device)
-        grid_nonrot = torch.tensor(pos_grid)
-        atom_positions_original = torch.tensor(qm9_mol.positions.copy(), device=self.device, dtype=torch.float)
-
-        result_nontransformed = self(qm9_mol.copy(), n_elec=qm9_n_elec, rotation_matrix=r_mat)
-
-        weights_nontransformed = result_nontransformed['weights']
-        pos_disp_nontransformed = result_nontransformed['pos_disp']
-        X_nontransformed = result_nontransformed['cov']
-        scalar_mults_nontransformed = result_nontransformed['scal_mults']
-
-        n_multiples_original = result_nontransformed['n_multiples']
-        n_multiples_original = n_multiples_original.to(self.device)
-        atom_positions_original = atom_positions_original.to(self.device)
-        atom_positions_original = atom_positions_original.reshape(n_multiples_original.shape[0], -1)
-        pos_tens_orig_original = atom_positions_original.repeat_interleave(n_multiples_original, 0).view(-1, 3)
-        pos_tens_orig_original = pos_tens_orig_original.to(self.device)
-        gaus_pos_original = pos_tens_orig_original + pos_disp_nontransformed
-
-        if r_mat is not None:
-            positions_original = torch.tensor(atom_positions_original)
-            positions_original = positions_original.to(self.device)
-            atom_positions = (r_mat @ positions_original.T).T
-            qm9_mol.positions = atom_positions.cpu().numpy()
-            grid_nonrot = torch.tensor(pos_grid)
-            pos_grid = self.rotate_vector(pos_grid.view(-1, 3), r_mat).view(pos_grid.shape)
-            result_transformed = self(atoms=qm9_mol,
-                                      n_elec=qm9_n_elec,
-                                      rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
-        if translation is not None:
-            positions_original = torch.tensor(atom_positions_original)
-            positions_original = positions_original.to(self.device)
-            atom_positions = positions_original + translation
-            qm9_mol.positions = atom_positions.cpu().numpy()
-            pos_grid = pos_grid + translation
-            result_transformed = self(atoms=qm9_mol,
-                                      n_elec=qm9_n_elec,
-                                      rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
-
-        if inversion:
-            positions_original = torch.tensor(atom_positions_original)
-            positions_original = positions_original.to(self.device)
-            atom_positions = -positions_original
-            qm9_mol.positions = atom_positions.cpu().numpy()
-            pos_grid = -pos_grid
-            result_transformed = self(atoms=qm9_mol,
-                                      n_elec=qm9_n_elec,
-                                      rotation_matrix=r_mat,
-                                      orig_pos=positions_original)
-        weights_transformed = result_transformed['weights']
-        pos_disp_transformed = result_transformed['pos_disp']
-        X_transformed = result_transformed['cov']
-        scalar_mults_transformed = result_transformed['scal_mults']
-        n_multiples_transformed  = result_nontransformed['n_multiples']
-        n_multiples_transformed = n_multiples_transformed.to(self.device)
-        atom_positions = atom_positions.to(self.device)
-        atom_positions = atom_positions.reshape(n_multiples_transformed.shape[0], -1)
-        pos_tens_orig_transformed = atom_positions.repeat_interleave(n_multiples_transformed, 0).view(-1, 3)
-        pos_tens_orig_transformed = pos_tens_orig_transformed.to(self.device)
-        gaus_pos_transformed = pos_tens_orig_transformed + pos_disp_transformed
-
-        if r_mat is not None or inversion or translation is not None:
-            self.check_equivariance_scalar(scalar_transformed=weights_transformed, orig_scalar=weights_nontransformed)
-            self.check_equivariance_scalar(scalar_transformed=scalar_mults_transformed, orig_scalar=scalar_mults_nontransformed)
-            self.check_equivariance_vector(vector_transformed=pos_disp_transformed, orig_vector=pos_disp_nontransformed,
-                                           r_mat=r_mat if r_mat is not None else None,
-                                           translation=translation if translation is not None else None,
-                                           inversion=inversion)
-            self.check_equivariance_matrix(matrix_transformed=X_transformed, orig_matrix=X_nontransformed,
-                                           r_mat=r_mat if r_mat is not None else None,
-                                           translation=translation if translation is not None else None,
-                                           inversion=inversion)
-
-
-        sys_dist = gto(
-            pos=atom_positions_original,
-            pos_disp=pos_disp_nontransformed,
-            cov=X_nontransformed,
-            scales=weights_nontransformed.reshape(weights_nontransformed.shape[0], 1, 1),
-            scalar_mults=scalar_mults_nontransformed if self.config['negative_contributions'] else None,
-            n_multiples=result_nontransformed['n_multiples'],
-            relu=self.config['relu'],
-            device=self.device)
-
-        density_original, _ = get_n_points_dens(atom_dist=sys_dist,
-                                       pos_grid=grid_nonrot,
-                                       gaus_pos=gaus_pos_original,
-                                       n_multiples=result_nontransformed['n_multiples'],
-                                       n_points=self.config['n_split_points'],
-                                       sample_all=True,
-                                       r_mat=r_mat,
-                                       grid_nonrot=grid_nonrot)
-
-        density_original, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                            density=density_original,
-                                                            qm9_density=qm9_density,
-                                                            grid_dict=qm9_grid_dict,
-                                                            sys=qm9_mol,
-                                                            points=None)
-
-        if r_mat is not None or inversion or translation is not None:
-            sys_dist = gto(
-                pos=atom_positions,
-                pos_disp=pos_disp_transformed,
-                cov=X_transformed,
-                scales=weights_transformed.reshape(weights_transformed.shape[0], 1, 1),
-                scalar_mults=scalar_mults_transformed if self.config['negative_contributions'] else None,
-                n_multiples=result_transformed['n_multiples'],
-                relu=self.config['relu'],
-                device=self.device)
-
-            density_transformed, _ = get_n_points_dens(atom_dist=sys_dist,
-                                                    pos_grid=pos_grid,
-                                                    gaus_pos=gaus_pos_transformed,
-                                                    n_multiples=result_transformed['n_multiples'],
-                                                    n_points=self.config['n_split_points'],
-                                                    sample_all=True)
-
-            density_transformed, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                                  density=density_transformed,
-                                                                  qm9_density=qm9_density,
-                                                                  grid_dict=qm9_grid_dict,
-                                                                  sys=qm9_mol,
-                                                                  points=None)
-
-            return density_original, density_transformed
-        else:
-            return density_original
-    def rotate_vector(self, vector, r_mat):
-        rotated = (r_mat @ vector.T).T
-        return rotated
-
-    def rotate_matrix(self, matrix, r_mat):
-        rotation_matrix_inv_expanded = torch.inverse(r_mat).unsqueeze(0).unsqueeze(0)
-        rotation_matrix_expanded = r_mat.unsqueeze(0).unsqueeze(0)
-        intermediate_tensor = torch.matmul(rotation_matrix_expanded, matrix)
-        rotated_tensor = torch.matmul(intermediate_tensor, rotation_matrix_inv_expanded).squeeze(0)
-        return rotated_tensor
-
-    def check_equivariance_vector(self, vector_transformed, orig_vector, r_mat, translation, inversion):
-        if r_mat is not None:
-            transformed_original_vector = self.rotate_vector(orig_vector, r_mat)
-        elif inversion:
-            transformed_original_vector = -orig_vector
-        elif translation is not None:
-            transformed_original_vector = orig_vector
-        equivariant = torch.allclose(transformed_original_vector, vector_transformed, atol=1e-2)
-        print(f"Vector equivariance check passed: {equivariant}")
-
-    def check_equivariance_matrix(self, matrix_transformed, orig_matrix, r_mat, translation, inversion):
-        if r_mat is not None:
-            transformed_original_matrix = self.rotate_matrix(orig_matrix, r_mat)
-        elif inversion:
-            transformed_original_matrix = orig_matrix
-        elif translation is not None:
-            transformed_original_matrix = orig_matrix
-        equivariant = torch.allclose(transformed_original_matrix, matrix_transformed, atol=1e-2)
-        print(f"Matrix equivariance check passed: {equivariant}")
-
-    def check_equivariance_scalar(self, scalar_transformed, orig_scalar):
-        equivariant = torch.allclose(orig_scalar, scalar_transformed, atol=1e-2)
-        print(f"Scalar equivariance check passed: {equivariant}")
-
-    def init_hotpp_model(self):
-        elements = ['H', 'O', 'C', 'N', 'F', 'Cl', 'Br', 'I']
-        element_numbers = []
-        for element in elements:
-            element_numbers.append(atomic_numbers[element])
-        if self.config['embed_type'] == 'aufbau':
-            emb_layer = AufbauEmbedding(element_numbers, self.config['master_units'], device=self.device)
-        elif self.config['embed_type'] == 'atomic':
-            emb_layer = AtomicEmbedding(element_numbers, self.config['master_units'])
-        emb_layer.to(self.device)
-        self.emb_layer = emb_layer
-        cut_fn = PolynomialCutoff(cutoff=self.config['hotpp_cutoff'], p=self.config['poly_order'])
-        radial_fn = BesselPoly(r_max=self.config['hotpp_cutoff'], n_max=self.config['master_units'], cutoff_fn=cut_fn)
-        nlayers = self.config['hotpp_nlayers']
-        if self.config['miaonet'] == "miaomiao":
-            self.base_model = MiaoMiaoNet(embedding_layer=emb_layer,
-                                      radial_fn=radial_fn,
-                                      n_layers=nlayers,
-                                      max_n_body=[self.config['n_max']]*nlayers,
-                                      max_r_way=[self.config['r_max']] * nlayers,
-                                      max_out_way=[self.config['out_max']] * nlayers,
-                                      max_out_heads=self.config['max_out_heads'],
-                                      output_dim=[self.config['hotpp_outdim']] * nlayers,
-                                      activate_fn=self.config['activation_type'],
-                                      head_activate_list=self.config['head_activate_list'],
-                                      mean=0.,
-                                      std=1.,
-                                      norm_factor=1.,
-                                      bilinear=False,
-                                      norm_heads=self.config['norm_heads'],
-                                     norm_blocks=self.config['norm_blocks'],
-                                      conv_mode=self.config['conv_mode'],
-                                      update_edge=self.config['update_edge'],
-                                     prune=self.config['prune'])
-        else:
-            self.base_model = MiaoNet(embedding_layer=emb_layer,
-                              radial_fn=radial_fn,
-                              n_layers=nlayers,
-                              max_r_way=[self.config['r_max']]*nlayers,
-                              max_out_way=[self.config['out_max']]*nlayers,
-                              max_out_heads=self.config['max_out_heads'],
-                              output_dim=[self.config['hotpp_outdim']]*nlayers,
-                              activate_fn=self.config['activation_type'],
-                              head_activate_list=self.config['head_activate_list'],
-                              mean=0.,
-                              std=1.,
-                              norm_factor=1.,
-                              bilinear=False,
-                              conv_mode=self.config['conv_mode'],
-                              update_edge=self.config['update_edge'])
-
-    def train_dataloader(self):
-        # Create dataset and dataloader
-        if self.config['MD_Data']:
-            return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
-                                                  self.config["MD_MOL"],
-                                                  "train"),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
-        else:
-            return DataLoader(QM9Dataset(self.train_files, self.qm9_dens_path, self.config),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
-
-    def val_dataloader(self):
-        if self.config['MD_Data']:
-            return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
-                                                  self.config["MD_MOL"],
-                                                  "validation"),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
-        else:
-            return DataLoader(QM9Dataset(self.validation_files, self.qm9_dens_path, self.config),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
-
-    def test_dataloader(self):
-        if self.config['MD_Data']:
-            return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
-                                                  self.config["MD_MOL"],
-                                                  "test"),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
-        else:
-            return DataLoader(QM9Dataset(self.test_files, self.qm9_dens_path, self.config),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
+        return loss
 
     def plot_gaussian_positions(self,
                                 atom_types,
