@@ -505,6 +505,78 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                           gamma=self.config['lr_gamma'])
         return [optimizer], [lr_scheduler]
 
+    def train_dataloader(self):
+        """Build the training dataloader without triggering density-specific work."""
+        if self.config['MD_Data']:
+            dataset = SmallDensityDataset(
+                self.config["MD_ROOT"],
+                self.config["MD_MOL"],
+                "train",
+            )
+        else:
+            dataset = QM9Dataset(
+                self.train_files,
+                self.qm9_dens_path,
+                self.config,
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            num_workers=0,
+        )
+
+    def val_dataloader(self):
+        """Validation dataloader mirroring the energy-only dataset pipeline."""
+        if self.config['MD_Data']:
+            dataset = SmallDensityDataset(
+                self.config["MD_ROOT"],
+                self.config["MD_MOL"],
+                "validation",
+            )
+        else:
+            dataset = QM9Dataset(
+                self.validation_files,
+                self.qm9_dens_path,
+                self.config,
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            num_workers=0,
+        )
+
+    def test_dataloader(self):
+        """Test dataloader for energy predictions only."""
+        if self.config['MD_Data']:
+            dataset = SmallDensityDataset(
+                self.config["MD_ROOT"],
+                self.config["MD_MOL"],
+                "test",
+            )
+        else:
+            dataset = QM9Dataset(
+                self.test_files,
+                self.qm9_dens_path,
+                self.config,
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            num_workers=0,
+        )
+
     def training_step(self,
                       batch,
                       batch_idx: int):
