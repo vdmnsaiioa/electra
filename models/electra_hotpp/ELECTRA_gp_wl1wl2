@@ -141,6 +141,81 @@ class ELECTRA(L.LightningModule, IOMixIn):
             self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
 
+    def init_hotpp_model(self) -> None:
+        """Initialise the HOTPP backbone responsible for feature generation."""
+        elements = ['H', 'O', 'C', 'N', 'F', 'Cl', 'Br', 'I']
+        element_numbers = [atomic_numbers[element] for element in elements]
+
+        embed_type = self.config.get('embed_type', 'atomic')
+        if embed_type == 'aufbau':
+            emb_layer = AufbauEmbedding(
+                element_numbers,
+                self.config['master_units'],
+                device=self.device,
+            )
+        elif embed_type == 'atomic':
+            emb_layer = AtomicEmbedding(
+                element_numbers,
+                self.config['master_units'],
+            )
+        else:
+            raise ValueError(f"Unsupported embedding type: {embed_type}")
+
+        emb_layer.to(self.device)
+        self.emb_layer = emb_layer
+
+        cut_fn = PolynomialCutoff(
+            cutoff=self.config['hotpp_cutoff'],
+            p=self.config['poly_order'],
+        )
+        radial_fn = BesselPoly(
+            r_max=self.config['hotpp_cutoff'],
+            n_max=self.config['master_units'],
+            cutoff_fn=cut_fn,
+        )
+
+        nlayers = self.config['hotpp_nlayers']
+        if self.config['miaonet'] == "miaomiao":
+            self.base_model = MiaoMiaoNet(
+                embedding_layer=emb_layer,
+                radial_fn=radial_fn,
+                n_layers=nlayers,
+                max_n_body=[self.config['n_max']] * nlayers,
+                max_r_way=[self.config['r_max']] * nlayers,
+                max_out_way=[self.config['out_max']] * nlayers,
+                max_out_heads=self.config['max_out_heads'],
+                output_dim=[self.config['hotpp_outdim']] * nlayers,
+                activate_fn=self.config['activation_type'],
+                head_activate_list=self.config['head_activate_list'],
+                mean=0.,
+                std=1.,
+                norm_factor=1.,
+                bilinear=False,
+                norm_heads=self.config['norm_heads'],
+                norm_blocks=self.config['norm_blocks'],
+                conv_mode=self.config['conv_mode'],
+                update_edge=self.config['update_edge'],
+                prune=self.config['prune'],
+            )
+        else:
+            self.base_model = MiaoNet(
+                embedding_layer=emb_layer,
+                radial_fn=radial_fn,
+                n_layers=nlayers,
+                max_r_way=[self.config['r_max']] * nlayers,
+                max_out_way=[self.config['out_max']] * nlayers,
+                max_out_heads=self.config['max_out_heads'],
+                output_dim=[self.config['hotpp_outdim']] * nlayers,
+                activate_fn=self.config['activation_type'],
+                head_activate_list=self.config['head_activate_list'],
+                mean=0.,
+                std=1.,
+                norm_factor=1.,
+                bilinear=False,
+                conv_mode=self.config['conv_mode'],
+                update_edge=self.config['update_edge'],
+            )
+
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """Compute mean absolute percentage error between prediction and target.
