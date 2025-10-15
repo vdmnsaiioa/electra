@@ -33,6 +33,7 @@ from ase.data import atomic_numbers
 from ase.neighborlist import neighbor_list
 logger = logging.getLogger(__file__)
 BOHR_TO_ANGSTROM = 0.529177249
+HARTREE_TO_MEV = 27.2107 * 1000
 
 class ELECTRA(L.LightningModule, IOMixIn):
     __version__ = 1
@@ -127,6 +128,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #self.energy_loss_fn = self.normalized_l1_loss
         self.energy_loss_coef = config.get("energy_loss_coef")
         self.energy_loss_history: deque[dict] = deque(maxlen=20)
+        self.energy_conversion_factor = torch.tensor(
+            HARTREE_TO_MEV,
+            dtype=self.precision,
+        )
         base_energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
         log_dir, log_filename = os.path.split(base_energy_nan_log_path)
         name, ext = os.path.splitext(log_filename)
@@ -613,6 +618,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         rmse = torch.sqrt(base_mse)
+        rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
         if atom_count is not None:
             atom_count_t = torch.tensor(
@@ -649,13 +655,32 @@ class ELECTRA(L.LightningModule, IOMixIn):
             logger=True,
             batch_size=1,
         )
+        self.log(
+            "Train Energy RMSE (meV)",
+            rmse_mev.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
 
         if atom_count_t is not None:
             nrmse = rmse / atom_count_t
+            nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
             self.log(
                 "Train Energy NRMSE",
                 nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
+            self.log(
+                "Train Energy NRMSE (meV)",
+                nrmse_mev.detach(),
                 on_step=True,
                 on_epoch=True,
                 prog_bar=False,
@@ -710,6 +735,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         rmse = torch.sqrt(base_mse)
+        rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
         if atom_count is not None:
             atom_count_t = torch.tensor(
@@ -746,13 +772,32 @@ class ELECTRA(L.LightningModule, IOMixIn):
             logger=True,
             batch_size=1,
         )
+        self.log(
+            "Validation Energy RMSE (meV)",
+            rmse_mev.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
 
         if atom_count_t is not None:
             nrmse = rmse / atom_count_t
+            nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
             self.log(
                 "Validation Energy NRMSE",
                 nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
+            self.log(
+                "Validation Energy NRMSE (meV)",
+                nrmse_mev.detach(),
                 on_step=True,
                 on_epoch=True,
                 prog_bar=False,
@@ -807,6 +852,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         rmse = torch.sqrt(base_mse)
+        rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
         if atom_count is not None:
             atom_count_t = torch.tensor(
@@ -843,13 +889,32 @@ class ELECTRA(L.LightningModule, IOMixIn):
             logger=True,
             batch_size=1,
         )
+        self.log(
+            "Test Energy RMSE (meV)",
+            rmse_mev.detach(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            batch_size=1,
+        )
 
         if atom_count_t is not None:
             nrmse = rmse / atom_count_t
+            nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(predicted_energy - target_energy) / atom_count_t
             self.log(
                 "Test Energy NRMSE",
                 nrmse.detach(),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                batch_size=1,
+            )
+            self.log(
+                "Test Energy NRMSE (meV)",
+                nrmse_mev.detach(),
                 on_step=True,
                 on_epoch=True,
                 prog_bar=False,
