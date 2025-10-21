@@ -148,7 +148,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
     def on_fit_start(self):
         # Optional: only turn on when debugging
-        install_nan_hooks(self.backbone)  # catch inside the GNN
+        #install_nan_hooks(self.backbone)  # catch inside the GNN
         install_nan_hooks(self.wsm_network)  # catch Mish MLP
         # If you want everything: install_nan_hooks(self)
 
