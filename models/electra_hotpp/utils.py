@@ -61,20 +61,66 @@ def add_scaling(batch_data: Dict[str, torch.Tensor], ) -> Dict[str, torch.Tensor
 
 
 def find_distances(batch_data: Dict[str, torch.Tensor], ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Populate edge displacement, distance, and direction tensors.
+
+    The dataloaders occasionally emit self-edges (``idx_i == idx_j``), which lead to
+    zero-length displacement vectors and non-finite gradients downstream.  Before
+    computing geometric features we drop such edges – along with any other tensors
+    defined per-edge – so the remaining edges all have strictly positive distances.
+    """
+
+    def _filter_edges(mask: torch.Tensor) -> None:
+        """Remove edges masked out by ``mask`` from ``batch_data`` in-place."""
+
+        if mask.numel() == 0:
+            return
+        if mask.dtype is not torch.bool:
+            mask_bool = mask.to(dtype=torch.bool)
+        else:
+            mask_bool = mask
+        if torch.all(mask_bool):
+            return
+
+        edge_size = mask_bool.shape[0]
+        for key in list(batch_data.keys()):
+            value = batch_data[key]
+            if torch.is_tensor(value) and value.dim() >= 1 and value.shape[0] == edge_size:
+                batch_data[key] = value[mask_bool]
+
     if 'rij' not in batch_data:
         idx_i = batch_data["idx_i"]
-        if 'ghost_neigh' in batch_data:  # neighbor for lammps calculation
-            idx_j = batch_data["ghost_neigh"]
-        else:
-            idx_j = batch_data["idx_j"]
+        idx_j_key = "ghost_neigh" if 'ghost_neigh' in batch_data else "idx_j"
+        idx_j = batch_data[idx_j_key]
+
+        if idx_i.shape == idx_j.shape and idx_i.numel() > 0:
+            non_self_mask = idx_i != idx_j
+            _filter_edges(non_self_mask)
+            idx_i = batch_data["idx_i"]
+            idx_j = batch_data[idx_j_key]
+
         if 'offset' in batch_data:
             batch_data['rij'] = batch_data['coordinate'][idx_j] + batch_data['offset'] - batch_data['coordinate'][idx_i]
         else:
             batch_data['rij'] = batch_data['coordinate'][idx_j] - batch_data['coordinate'][idx_i]
+
     if 'dij' not in batch_data:
-        batch_data['dij'] = torch.norm(batch_data['rij'], dim=-1)
+        rij = batch_data['rij']
+        dij = torch.norm(rij, dim=-1)
+        if dij.numel() > 0:
+            positive_mask = dij > 0
+            _filter_edges(positive_mask)
+            if not torch.all(positive_mask):
+                rij = batch_data['rij']
+                dij = torch.norm(rij, dim=-1)
+        batch_data['dij'] = dij
+
     if 'uij' not in batch_data:
-        batch_data['uij'] = batch_data['rij'] / batch_data['dij'].unsqueeze(-1)
+        dij = batch_data['dij']
+        if dij.numel() == 0:
+            batch_data['uij'] = batch_data['rij'].new_empty((0, batch_data['rij'].shape[-1]))
+        else:
+            batch_data['uij'] = batch_data['rij'] / dij.unsqueeze(-1)
+
     return batch_data['rij'], batch_data['dij'], batch_data['uij']
 
 
