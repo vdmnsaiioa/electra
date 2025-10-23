@@ -74,15 +74,23 @@ class TensorActivateLayer(nn.Module):
         super().__init__()
         self.weights = nn.Parameter(torch.ones(input_dim, requires_grad=True))
         self.bias = nn.Parameter(torch.zeros(input_dim, requires_grad=True))
+        eps = torch.finfo(torch.float32).eps
+        self.register_buffer("_stability_eps", torch.tensor(eps))
+
+    def _clamp_nan_inf(self, tensor: torch.Tensor) -> torch.Tensor:
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        return tensor
 
     def forward(self,
                 input_tensor: torch.Tensor,
                 ) -> torch.Tensor:
+        input_tensor = self._clamp_nan_inf(input_tensor)
         way = len(input_tensor.shape) - 2
         if way == 0:
-            return self.activate(input_tensor)
+            output = self.activate(input_tensor)
         else:
-            return self.tensor_activate(input_tensor, way=way)
+            output = self.tensor_activate(input_tensor, way=way)
+        return self._clamp_nan_inf(output)
 
     def activate(self,
                  input_tensor: torch.Tensor,
