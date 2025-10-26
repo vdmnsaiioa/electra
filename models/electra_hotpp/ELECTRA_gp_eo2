@@ -177,6 +177,21 @@ class ELECTRA(L.LightningModule, IOMixIn):
             tensor = torch.clamp(tensor, -clamp, clamp)
         return tensor
 
+    def _ensure_finite_collection(self, collection, name: str):
+        """Recursively apply :meth:`_ensure_finite_tensor` to container values."""
+        if isinstance(collection, dict):
+            return {
+                key: self._ensure_finite_tensor(value, f"{name}[{key}]")
+                for key, value in collection.items()
+            }
+        if isinstance(collection, (list, tuple)):
+            sanitised = [
+                self._ensure_finite_tensor(value, f"{name}[{idx}]")
+                for idx, value in enumerate(collection)
+            ]
+            return type(collection)(sanitised)
+        return self._ensure_finite_tensor(collection, name)
+
     def init_hotpp_model(self) -> None:
         """Initialise the HOTPP backbone responsible for feature generation."""
         elements = ['H', 'O', 'C', 'N', 'F', 'Cl', 'Br', 'I']
@@ -375,9 +390,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                                          properties=None,
                                                                           create_graph=False)
 
-        X_scal_full = tuple(self._ensure_finite_tensor(t, "base_model.X_scal_full") for t in X_scal_full)
-        X_vec_full = tuple(self._ensure_finite_tensor(t, "base_model.X_vec_full") for t in X_vec_full)
-        X_tens_full = tuple(self._ensure_finite_tensor(t, "base_model.X_tens_full") for t in X_tens_full)
+        X_scal_full = self._ensure_finite_collection(X_scal_full, "base_model.X_scal_full")
+        X_vec_full = self._ensure_finite_collection(X_vec_full, "base_model.X_vec_full")
+        X_tens_full = self._ensure_finite_collection(X_tens_full, "base_model.X_tens_full")
         init_emb = self._ensure_finite_tensor(init_emb, "base_model.init_emb")
 
         X_scal = X_scal_full[0]
