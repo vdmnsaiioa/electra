@@ -151,7 +151,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def on_fit_start(self):
         # Optional: only turn on when debugging
         #install_nan_hooks(self.backbone)  # catch inside the GNN
-        install_nan_hooks(self.base_model)
+        #install_nan_hooks(self.base_model)
         install_nan_hooks(self.wsm_network)  # catch Mish MLP
         # If you want everything: install_nan_hooks(self)
 
@@ -161,7 +161,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
     def _ensure_finite_tensor(self, tensor: torch.Tensor, name: str, clamp: float | None = None) -> torch.Tensor:
         """Replace NaN/Inf values while logging the offending tensor once."""
-        if tensor is None:
+        if tensor is None or not isinstance(tensor, torch.Tensor):
             return tensor
         if not torch.isfinite(tensor).all():
             if name not in self._nan_warning_cache:
