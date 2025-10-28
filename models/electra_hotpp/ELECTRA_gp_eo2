@@ -76,8 +76,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.best_val_loss = float("inf")
         self.val_error_dict = {}
         self.val_iter = 0
-        self.nan_guard_max = float(config.get("nan_guard_clamp", 1e6))
-        self._nan_warning_cache: set[str] = set()
         for i, file in enumerate(self.validation_files):
             name = f"Val_file_{i}"
             self.val_error_dict[name] = float("inf")
@@ -116,9 +114,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             )
          # Network for predicting molecular energy from scalar features
         self.phi_network = nn.Sequential(
-            nn.Linear(8 * self.units, self.units *4),
+            nn.Linear(3 * self.units, self.units *3),
             nn.Tanh(), # changed from minsh
-            nn.Linear(self.units * 4, self.units),
+            nn.Linear(self.units * 3, self.units),
         )
         self.rho_network = nn.Sequential(
             nn.Linear(self.units, self.units),
@@ -151,46 +149,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def on_fit_start(self):
         # Optional: only turn on when debugging
         #install_nan_hooks(self.backbone)  # catch inside the GNN
-        #install_nan_hooks(self.base_model)
         install_nan_hooks(self.wsm_network)  # catch Mish MLP
         # If you want everything: install_nan_hooks(self)
 
     def on_after_backward(self):
         # Will raise immediately on the first offending parameter
         check_param_grads(self)
-
-    def _ensure_finite_tensor(self, tensor: torch.Tensor, name: str, clamp: float | None = None) -> torch.Tensor:
-        """Replace NaN/Inf values while logging the offending tensor once."""
-        if tensor is None or not isinstance(tensor, torch.Tensor):
-            return tensor
-        if not torch.isfinite(tensor).all():
-            if name not in self._nan_warning_cache:
-                logger.warning("Non-finite values detected in %s; applying nan_to_num safeguard", name)
-                self._nan_warning_cache.add(name)
-            tensor = torch.nan_to_num(
-                tensor,
-                nan=0.0,
-                posinf=self.nan_guard_max,
-                neginf=-self.nan_guard_max,
-            )
-        if clamp is not None:
-            tensor = torch.clamp(tensor, -clamp, clamp)
-        return tensor
-
-    def _ensure_finite_collection(self, collection, name: str):
-        """Recursively apply :meth:`_ensure_finite_tensor` to container values."""
-        if isinstance(collection, dict):
-            return {
-                key: self._ensure_finite_tensor(value, f"{name}[{key}]")
-                for key, value in collection.items()
-            }
-        if isinstance(collection, (list, tuple)):
-            sanitised = [
-                self._ensure_finite_tensor(value, f"{name}[{idx}]")
-                for idx, value in enumerate(collection)
-            ]
-            return type(collection)(sanitised)
-        return self._ensure_finite_tensor(collection, name)
 
     def init_hotpp_model(self) -> None:
         """Initialise the HOTPP backbone responsible for feature generation."""
@@ -390,11 +354,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                                          properties=None,
                                                                           create_graph=False)
 
-        X_scal_full = self._ensure_finite_collection(X_scal_full, "base_model.X_scal_full")
-        X_vec_full = self._ensure_finite_collection(X_vec_full, "base_model.X_vec_full")
-        X_tens_full = self._ensure_finite_collection(X_tens_full, "base_model.X_tens_full")
-        init_emb = self._ensure_finite_tensor(init_emb, "base_model.init_emb")
-
         X_scal = X_scal_full[0]
         X_scal_vec = X_scal_full[1]
         X_scal_tens = X_scal_full[2]
@@ -435,7 +394,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         pos_disp_2 = X_scal_vec.view(-1, 3)
         pos_disp_3 = X_tens_vec.view(-1, 3)
 
-        wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
+        #wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
+        wsm_ = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         input_l0 = wsm_
 
         wsm2 = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
@@ -443,18 +403,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
         det_scal = torch.det(X_scal_tens.view(-1, 3, 3)).view(n_atoms, self.units)
         det_vec = torch.det(X_vec_tens.view(-1, 3, 3)).view(n_atoms, self.units)
         det_tens = torch.det(X_tens.view(-1, 3, 3)).view(n_atoms, self.units)
-        det_scal = self._ensure_finite_tensor(det_scal, "det_scal", clamp=self.nan_guard_max)
-        det_vec = self._ensure_finite_tensor(det_vec, "det_vec", clamp=self.nan_guard_max)
-        det_tens = self._ensure_finite_tensor(det_tens, "det_tens", clamp=self.nan_guard_max)
 
         pos_scalars = self.pos_factors_network(wsm_)
         matrix_scalars = self.matrix_factors_network(wsm_)
         wsm = self.wsm_network(wsm_)
-        pos_scalars = self._ensure_finite_tensor(pos_scalars, "pos_scalars")
-        matrix_scalars = self._ensure_finite_tensor(matrix_scalars, "matrix_scalars")
-        wsm = self._ensure_finite_tensor(wsm, "wsm")
         
-        wsm_energy = torch.cat((wsm_, det_scal, det_vec, det_tens), dim=-1)
+        #wsm_energy = torch.cat((wsm_, det_scal, det_vec, det_tens), dim=-1)
         # guga
         weights_sm = torch.softmax(wsm[:, :self.units].reshape(n_atoms * self.units), dim=0)
         scal_mults_th = wsm[:, self.units:self.units * 2].reshape(n_atoms * self.units)
@@ -477,11 +431,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
             X_tens = S1 * self.symm_tensor(X_tens).view(-1, 3, 3) + S2 * self.symm_tensor(X_vec_tens).view(-1, 3,3) + S3 * self.symm_tensor(X_scal_tens).view(-1, 3, 3)
         else:
             X_tens = 0.33*self.symm_tensor(X_tens).view(-1, 3, 3) + 0.33*self.symm_tensor(X_vec_tens).view(-1, 3,3) + 0.33*self.symm_tensor(X_scal_tens).view(-1, 3, 3)
-        X_tens = self._ensure_finite_tensor(X_tens, "X_tens_combined")
 
         cov_final = X_tens.view(-1, 3, 3)
         cov_final = self.construct_pos_def(cov_final)
-        cov_final = self._ensure_finite_tensor(cov_final, "cov_final")
+        if not torch.isfinite(cov_final).all():
+            logger.warning("Non-finite values in cov_final")
+            print('Non-finite values in cov_final')
 
         if self.config['use_pos_disp_functions']:
             pos_disp_final = pos_disp*torch.exp(pos_factors) + pos_disp_2*torch.square(pos_factors_2) + pos_disp_3 * pos_factors_3
@@ -504,22 +459,20 @@ class ELECTRA(L.LightningModule, IOMixIn):
             image_weights = None #torch.abs(self.image_network(wsm_).reshape(27, self.units*n_atoms))
         else:
             image_weights = None
-        pos_disp_final = self._ensure_finite_tensor(pos_disp_final, "pos_disp_final")
+        if not torch.isfinite(pos_disp_final).all():
+            logger.warning("Non-finite values in pos_disp_final")
+            print('Non-finite values in pos_disp_final')
 
         pos_disp_features = torch.linalg.norm(pos_disp_final.view(n_atoms, self.units,3),dim=-1)
-        pos_disp_features = self._ensure_finite_tensor(pos_disp_features, "pos_disp_features")
 
         input_l0 = wsm_ # needs 4 on energy
         input_l0l1 = torch.cat((input_l0, pos_disp_features), dim=-1) # needs 5 on energy
         input_l0l1l2 = torch.cat((input_l0l1, det_scal, det_vec, det_tens), dim=-1) # needs 8 on energy
 
         #norm_energy_input = self.energy_layer_norm(energy_input)
-        phi_out = self.phi_network(input_l0l1l2)
-        phi_out = self._ensure_finite_tensor(phi_out, "phi_out")
+        phi_out = self.phi_network(input_l0)
         pooled = phi_out.sum(dim=0)
-        pooled = self._ensure_finite_tensor(pooled, "pooled")
         energy = self.rho_network(pooled).squeeze(-1)
-        energy = self._ensure_finite_tensor(energy, "energy")
         
         result = {"cov": cov_final,
                   "pos_disp": pos_disp_final,
@@ -557,12 +510,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         """
         eps = 1e-6  # Small epsilon
         matrix += torch.eye(3, device=self.device).unsqueeze(0).expand(matrix.shape) * eps
-        matrix = torch.nan_to_num(
-            matrix,
-            nan=0.0,
-            posinf=self.nan_guard_max,
-            neginf=-self.nan_guard_max,
-        )
         return matrix
 
 
@@ -681,13 +628,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             else self.energy_loss_coef * base_mse
         )
 
-        if not torch.isfinite(loss):
-            logger.warning(
-                "Encountered non-finite loss in training_step for %s; skipping update",
-                molecule_formula,
-            )
-            return torch.zeros((), device=loss.device, dtype=loss.dtype)
-
         rmse = torch.sqrt(base_mse)
         rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
@@ -804,13 +744,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             base_mse if self.energy_loss_coef is None
             else self.energy_loss_coef * base_mse
         )
-
-        if not torch.isfinite(loss):
-            logger.warning(
-                "Encountered non-finite loss in validation_step for %s; skipping metric logging",
-                molecule_formula,
-            )
-            return
 
         rmse = torch.sqrt(base_mse)
         rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
