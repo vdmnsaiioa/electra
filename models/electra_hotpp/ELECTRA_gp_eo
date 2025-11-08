@@ -355,6 +355,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                                           create_graph=False)
 
         X_scal = X_scal_full[0]
+        print(X_scal.shape)
         X_scal_vec = X_scal_full[1]
         X_scal_tens = X_scal_full[2]
 
