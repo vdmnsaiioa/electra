@@ -8,10 +8,11 @@ from collections import deque
 import uuid
 import wandb
 import logging
+import random
 from tools.atom_tools import valence_electrons
 from ase.data import chemical_symbols
 from utils.model_handling import ModelIO
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 import matgl
 import numpy as np
 import torch
@@ -22,7 +23,7 @@ from matgl.utils.io import IOMixIn
 from torch import nn
 import ase
 from tools.ase_converter import Atoms2Graph
-from tools.density_conversions import get_qm9_density
+from tools.density_conversions import get_qm9_density, chgcar_to_cd
 from tools.graph_tools import CollateFuncAtoms
 from utils.train_helper_funcs import set_optimizer, load_csv_to_dict
 import os
@@ -69,6 +70,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.validation_files = validation_files
         self.test_files = test_files
         self.qm9_dens_path = config['qm9_dens_path']
+        self.dens_path = config.get('mp_dens_path', config.get('dens_path', self.qm9_dens_path))
         self.pred_dens_path_val = config['pred_dens_path_val']
         self.pred_dens_path_test = config['pred_dens_path_test']
         self.density_delta_path_val = config['density_delta_path_val']
@@ -514,13 +516,41 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 self.config["MD_MOL"],
                 "train",
             )
-        else:
-            dataset = QM9Dataset(
-                self.train_files,
-                self.qm9_dens_path,
-                self.config,
+            return DataLoader(
+                dataset,
+                batch_size=1,
+                shuffle=False,
+                collate_fn=collate_fn,
+                pin_memory=True,
+                num_workers=0,
             )
 
+        if self.config.get("data_split") == "mpfull2025":
+            ds = DensityStream(
+                self.train_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
+            )
+
+        dataset = DensityDataset(
+            self.train_files,
+            self.dens_path,
+            self.config,
+            None,
+        )
         return DataLoader(
             dataset,
             batch_size=1,
@@ -1133,6 +1163,184 @@ def check_param_grads(module):
     for name, p in module.named_parameters():
         if p.grad is not None and not torch.isfinite(p.grad).all():
             raise RuntimeError(f"Non-finite grad in {name} (norm={p.grad.norm().item():.3e})")
+
+
+def _dl_worker_init(_):
+    """Customize DataLoader workers for fast disk throughput."""
+    os.environ.setdefault("TMPDIR", "/dev/shm")
+    torch.set_num_threads(1)
+
+
+def _resolve_density_path(root_path: str | None, cd_file: str) -> str:
+    """Return an absolute path for a density file regardless of input form."""
+    if os.path.isabs(cd_file):
+        return cd_file
+    if root_path and cd_file.startswith(root_path):
+        return cd_file
+    if root_path:
+        return os.path.join(root_path, cd_file)
+    return cd_file
+
+
+def _load_energy_metadata(config):
+    """Load optional energy/atom-count metadata for density samples."""
+    energy_csv = config.get("energy_csv")
+    if not energy_csv:
+        return None, None
+    try:
+        energy_dict = load_csv_to_dict(energy_csv, "file", "energy")
+        atom_count_dict = load_csv_to_dict(energy_csv, "file", "atom_count")
+        return energy_dict, atom_count_dict
+    except Exception as exc:
+        print(exc)
+        return None, None
+
+
+def _lookup_energy_info(
+    cd_file: str,
+    energy_dict: dict | None,
+    atom_count_dict: dict | None,
+):
+    """Return the energy and atom count for a density file if available."""
+    if not energy_dict or not atom_count_dict:
+        return None, None
+
+    key = os.path.basename(cd_file).split(".")[0]
+    key_no_zeros = key.lstrip("0") or "0"
+    energy = energy_dict.get(key_no_zeros)
+    atom_count = atom_count_dict.get(key_no_zeros)
+
+    try:
+        energy_value = None if energy in (None, "None", "") else float(energy)
+    except Exception:
+        energy_value = None
+
+    try:
+        atom_count_value = None if atom_count in (None, "None", "") else float(atom_count)
+    except Exception:
+        atom_count_value = None
+
+    return energy_value, atom_count_value
+
+
+def get_density(path: str):
+    """Load a compressed CHGCAR density file and derive metadata."""
+    density, structure = chgcar_to_cd(path)
+    if structure is None:
+        raise ValueError(f"No atomic structure found in {path}")
+
+    grid_dict = {
+        "nx": density.shape[0],
+        "ny": density.shape[1],
+        "nz": density.shape[2],
+    }
+    n_elec = valence_electrons(structure.get_chemical_formula())
+    return density, structure, n_elec, grid_dict
+
+
+class DensityDataset(Dataset):
+    """Random-access dataset that mirrors the QM9 density loader."""
+
+    def __init__(self, file_list, dens_path, config, ood_name=None):
+        self.file_list = list(file_list)
+        self.dens_path = dens_path
+        self.config = config
+        self.ood_name = ood_name
+        self.cache = {}
+        self.save_memory = config.get("save_memory", False)
+        self.energy_dict, self.atom_count_dict = _load_energy_metadata(config)
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        while True:
+            cd_file = self.file_list[idx]
+            if not self.save_memory and cd_file in self.cache:
+                return self.cache[cd_file]
+
+            try:
+                record = self._load_record(cd_file)
+                if not self.save_memory:
+                    self.cache[cd_file] = record
+                return record
+            except Exception as exc:
+                print(f"Error loading {cd_file}: {exc}")
+                idx = np.random.randint(0, len(self.file_list))
+
+    def _load_record(self, cd_file: str):
+        path = _resolve_density_path(self.dens_path, cd_file)
+        density, structure, n_elec, grid_dict = get_density(path)
+        energy, atom_count = _lookup_energy_info(
+            cd_file,
+            self.energy_dict,
+            self.atom_count_dict,
+        )
+        return (
+            density,
+            structure,
+            n_elec,
+            grid_dict,
+            cd_file,
+            self.ood_name,
+            energy,
+            atom_count,
+        )
+
+
+class DensityStream(IterableDataset):
+    """Iterable dataset that shards density files across DataLoader workers."""
+
+    def __init__(self, file_list, dens_path, config, ood_name=None, shuffle_each_epoch=False):
+        self.file_list = list(file_list)
+        self.dens_path = dens_path
+        self.config = config
+        self.ood_name = ood_name
+        self.shuffle_each_epoch = shuffle_each_epoch
+        self.energy_dict, self.atom_count_dict = _load_energy_metadata(config)
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __iter__(self):
+        worker = torch.utils.data.get_worker_info()
+        files = list(self.file_list)
+        if self.shuffle_each_epoch:
+            rng = random.Random(torch.randint(0, 10 ** 9, ()).item())
+            rng.shuffle(files)
+
+        if worker is None:
+            yield from self._iter_files(files)
+        else:
+            per_worker = int((len(files) + worker.num_workers - 1) / worker.num_workers)
+            start = worker.id * per_worker
+            end = min(start + per_worker, len(files))
+            yield from self._iter_files(files[start:end])
+
+    def _iter_files(self, files):
+        for cd_file in files:
+            path = _resolve_density_path(self.dens_path, cd_file)
+            try:
+                density, structure, n_elec, grid_dict = get_density(path)
+                energy, atom_count = _lookup_energy_info(
+                    cd_file,
+                    self.energy_dict,
+                    self.atom_count_dict,
+                )
+                yield (
+                    density,
+                    structure,
+                    n_elec,
+                    grid_dict,
+                    cd_file,
+                    self.ood_name,
+                    energy,
+                    atom_count,
+                )
+            except Exception as exc:
+                print(f"[skip] {cd_file}: {exc}")
+                continue
+
 
 def collate_fn(batch):
     return batch
