@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import time
 from collections import deque
@@ -9,6 +10,8 @@ import uuid
 import wandb
 import logging
 import random
+import re
+from pathlib import Path
 from tools.atom_tools import valence_electrons
 from ase.data import chemical_symbols
 from utils.model_handling import ModelIO
@@ -137,6 +140,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
             HARTREE_TO_MEV,
             dtype=self.precision,
         )
+        self.hotpp_csv_dir = self.config.get("hotpp_csv_dir", "hotpp_scalars")
+        self.job_id = self._resolve_job_id()
+        self._last_hotpp_log_step: int | None = None
         base_energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
         log_dir, log_filename = os.path.split(base_energy_nan_log_path)
         name, ext = os.path.splitext(log_filename)
@@ -387,6 +393,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         input_l0 = scalar_features
         input_l1 = torch.cat((scalar_features, vec_features),dim=-1)
         print(input_l1.shape,'aici naaa')
+        self._maybe_log_hotpp_scalars(scalar_features)
 
         wsm2 = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         # Compute determinants of l=2 tensor features
@@ -498,6 +505,66 @@ class ELECTRA(L.LightningModule, IOMixIn):
         eps = 1e-6  # Small epsilon
         matrix += torch.eye(3, device=self.device).unsqueeze(0).expand(matrix.shape) * eps
         return matrix
+
+    def _resolve_job_id(self) -> str:
+        """Best-effort resolution of the current HPC job identifier."""
+        potential_ids = [
+            self.config.get("job_id") if isinstance(self.config, dict) else None,
+            os.environ.get("SLURM_JOB_ID"),
+            os.environ.get("PBS_JOBID"),
+            os.environ.get("JOB_ID"),
+            os.environ.get("LSB_JOBID"),
+        ]
+
+        for job_id in potential_ids:
+            if not job_id:
+                continue
+
+            sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", str(job_id))
+            if sanitized:
+                return sanitized
+
+        return time.strftime("manual_%Y%m%d_%H%M%S")
+
+    def _maybe_log_hotpp_scalars(self, scalar_features: torch.Tensor) -> None:
+        """Persist scalar HOTPP features every 30k training steps."""
+        if not self.training:
+            return
+
+        step = getattr(self, "global_step", None)
+        if step is None or step <= 0 or step % 30000 != 0:
+            return
+
+        if self._last_hotpp_log_step == step:
+            return
+
+        try:
+            features_np = scalar_features.detach().cpu().numpy()
+        except Exception:
+            logger.exception("Failed to detach HOTPP scalar features for logging.")
+            return
+
+        output_dir = Path(self.hotpp_csv_dir)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.exception("Failed to create HOTPP scalar logging directory: %s", output_dir)
+            return
+
+        job_suffix = self.job_id or "unknown_job"
+        csv_path = output_dir / f"hotpp_scalars_{job_suffix}_step_{int(step)}.csv"
+
+        try:
+            units_column = np.full((features_np.shape[0], 1), self.units, dtype=features_np.dtype)
+            csv_data = np.concatenate((units_column, features_np), axis=1)
+            with csv_path.open("w", newline="") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerows(csv_data.tolist())
+        except Exception:
+            logger.exception("Failed to write HOTPP scalar features to %s", csv_path)
+            return
+
+        self._last_hotpp_log_step = step
 
 
     def configure_optimizers(self):
