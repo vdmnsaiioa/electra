@@ -54,6 +54,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         self.save_args(locals(), kwargs)
         self.activation_type = config['activation_type']
+        self.use_l1_energy_features = config.get('use_l1_energy_features', False)
+        self.l1_energy_out_dim = config.get('l1_energy_out_dim', config['hotpp_outdim'])
         self.gaus_per_electrons = config['gaus_per_electrons']
         # Once we drop the valence-based slicing we operate directly on the HOTPP
         # scalar channels. Treat those as the working "unit" count so all
@@ -111,6 +113,18 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
+        if self.use_l1_energy_features:
+            # To keep the l=1 pathway equivariant we can only apply linear
+            # combinations of the vector channels (shared across coordinates).
+            # Non-zero biases would inject a fixed vector that does not rotate,
+            # so we disable them.
+            self.l1_energy_linear = nn.Linear(
+                self.units,
+                self.l1_energy_out_dim,
+                bias=False,
+            )
+        else:
+            self.l1_energy_linear = None
 
         self.precision = torch.float32
         if self.config["crystal"]:
@@ -119,16 +133,18 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 nn.Mish(),
                 nn.Linear(self.units * 3, 27*self.units),
             )
+        energy_readout_in = self.units + (self.l1_energy_out_dim if self.use_l1_energy_features else 0)
+        self.energy_readout_in = energy_readout_in
          # Network for predicting molecular energy from scalar features
         self.phi_network = nn.Sequential(
-            nn.Linear(self.units, self.units//4), # with only l0 divide by 4
+            nn.Linear(self.energy_readout_in, self.energy_readout_in//4), # with only l0 divide by 4
             nn.Tanh(), # changed from minsh
-            nn.Linear(self.units //4, self.units//8),
+            nn.Linear(self.energy_readout_in //4, self.energy_readout_in//8),
         )
         self.rho_network = nn.Sequential(
-            nn.Linear(self.units//8, self.units//8),
+            nn.Linear(self.energy_readout_in//8, self.energy_readout_in//8),
             nn.Tanh(), # changed from minsh
-            nn.Linear(self.units//8, 1),
+            nn.Linear(self.energy_readout_in//8, 1),
         )
         self.energy_layer_norm = nn.LayerNorm(7 * self.units)
         self.energy_loss_fn = nn.MSELoss()
@@ -387,11 +403,16 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         wsm_ = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         scalar_features = X_scal.view(n_atoms, -1)
-        vec_features = X_vec.mean(dim=-1)
-        input_l0 = scalar_features
-        input_l1 = torch.cat((scalar_features, vec_features),dim=-1)
-        print(input_l1.shape,'aici naaa')
-        self._maybe_log_hotpp_scalars(scalar_features)
+        l1_scalar_features = None
+        if self.use_l1_energy_features:
+            vec_channels = X_vec.view(n_atoms, self.units, 3)
+            # Apply the shared linear mixing along the channel dimension while
+            # leaving the coordinate axis untouched so the operation commutes
+            # with rigid rotations. The norm over coordinates then produces
+            # rotationally invariant scalars sized by l1_energy_out_dim.
+            mixed_vec = self.l1_energy_linear(vec_channels.transpose(1, 2)).transpose(1, 2)
+            l1_scalar_features = torch.linalg.norm(mixed_vec, dim=-1)
+        energy_readout_input = scalar_features if l1_scalar_features is None else torch.cat((scalar_features, l1_scalar_features), dim=-1)
 
         wsm2 = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         # Compute determinants of l=2 tensor features
@@ -465,7 +486,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #input_l0l1l2 = torch.cat((input_l0l1, det_scal, det_vec, det_tens), dim=-1) # needs 8 on energy
 
         #norm_energy_input = self.energy_layer_norm(energy_input)
-        phi_out = self.phi_network(input_l0)
+        phi_out = self.phi_network(energy_readout_input)
         pooled = phi_out.sum(dim=0)
         energy = self.rho_network(pooled).squeeze(-1)
         
