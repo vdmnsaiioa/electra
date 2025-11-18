@@ -557,9 +557,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                    mol_volume=mol_volume)
         end = time.time()
         if self.config['wandb']:
-            wandb.log({"Full Inference Time TRAIN": end - start})
+            wandb.log({"Forward Time": end - start})
         else:
-            print("Full Inference Time TRAIN: ", end - start)
+            print("Forward Time: ", end - start)
         loss, dens_error = self.loss.compute_total_loss(
             sys=qm9_mol,
             pred_cd=density,
@@ -575,6 +575,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         rmse = None
         nrmse = None
         nl1 = None
+        density_loss = loss
         print(filename)
         if energy is None:
             print('not good')
@@ -620,22 +621,23 @@ class ELECTRA(L.LightningModule, IOMixIn):
             diag = torch.diag(torch.diagonal(cell_t))
             offdiag = (cell_t - diag).abs().max()
             is_ortho = offdiag < tol
-            if self.config['hpc']:
-                if is_ortho:
-                    wandb.log({"Orthogonal error %": np_err})
-                else:
-                    wandb.log({"Non-orthogonal error %": np_err})
+            if is_ortho:
+                print("Orthogonal error %: ", np_err)
             else:
-                if is_ortho:
-                    print("Orthogonal error %: ", np_err)
-                else:
-                    print("Non-orthogonal error %: ", np_err)
+                print("Non-orthogonal error %: ", np_err)
 
         self.log("Train Density Err calu %",
                  np.round(100 * dens_error.detach().cpu().numpy(), 3),
                  on_step=True,
                  on_epoch=True,
                  prog_bar=True,
+                 logger=True,
+                 batch_size=1)
+        self.log("Train Density Loss",
+                 density_loss.detach(),
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
                  logger=True,
                  batch_size=1)
         print(energy_loss, ': energy loss')
@@ -670,17 +672,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  logger=True,
                  batch_size=1)
         
-        if self.config['hpc']:
-            wandb_dict = {
-                "Train Density Err calu %": np.round(100 * dens_error.detach().cpu().numpy(), 3),
-                "Train Total Loss bleadi": float(total_loss.cpu().numpy())
-            }
-            
-            #wandb_dict["Train Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-            #wandb_dict["Train Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-            wandb_dict["Train Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
-
         if batch_idx < self.config['n_warmups']:
             self.optimizers().optimizer.param_groups[0]['lr'] = self.config['final_lr'] *((batch_idx+1)/self.config['n_warmups'])
         return loss
@@ -758,10 +749,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                    mol_volume=mol_volume)
         end = time.time()
         if self.config['wandb']:
-            if wandb.run is not None:
-                wandb.log({"Full Inference Time VAL": end - start})
+            wandb.log({"Forward Time": end - start})
         else:
-            print("Full Inference Time VAL:", end - start)
+            print("Forward Time:", end - start)
 
         loss, density_error = self.loss.compute_total_loss(
             sys=qm9_mol,
@@ -778,6 +768,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         rmse = None
         nrmse = None
         nl1 = None
+        density_loss = loss
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
@@ -812,6 +803,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
+        self.log("Validation Density Loss",
+                 density_loss.detach(),
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
+                 logger=True,
+                 batch_size=1)
         
         self.log("Validation Total Loss",
                  total_loss,
@@ -842,15 +840,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                       prog_bar=False,
                       logger=True,
                       batch_size=1)
-        if self.config['hpc']:
-            wandb_dict = {"Validation Density Err %": np_err,
-                          "Validation Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                #wandb_dict["Validation Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                #wandb_dict["Validation Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                wandb_dict["Validation Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
-
         if batch_idx == 0 and self.config['save_model']:
             self.model_handler.save(self)
 
@@ -1061,9 +1050,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
         end = time.time()
 
         if self.config['wandb']:
-            wandb.log({"Full Inference Time TEST": end - start})
+            wandb.log({"Forward Time": end - start})
         else:
-            print("Full Inference Time TEST: ", end - start)
+            print("Forward Time: ", end - start)
         loss, density_error = self.loss.compute_total_loss(
             sys=qm9_mol,
             pred_cd=density,
@@ -1079,6 +1068,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         rmse = None
         nrmse = None
         nl1 = None
+        density_loss = loss
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
@@ -1113,6 +1103,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
                  prog_bar=True,
                  logger=True,
                  batch_size=1)
+
+        self.log("Test Density Loss",
+                 density_loss.detach(),
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=False,
+                 logger=True,
+                 batch_size=1)
         
         self.log("Test Total Loss",
                  total_loss,
@@ -1144,16 +1142,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                      prog_bar=False,
                      logger=True,
                      batch_size=1)
-
-        if self.config['hpc']:
-            wandb.log({"Test Density Err %": np_err})
-            wandb_dict = {"Test Density Err %": np_err,
-                          "Test Total Loss": float(total_loss.cpu().numpy())}
-            if rmse is not None:
-                #wandb_dict["Test Energy RMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                #wandb_dict["Test Energy NRMSE in meV"] = float(rmse_meV.detach().cpu().numpy())
-                wandb_dict["Test Energy NL1"] = float(nl1.detach().cpu().numpy())
-            wandb.log(wandb_dict)
 
         if self.config['construct_test_cd'] and batch_idx % 100 == 0:
             qm9_path = os.path.join(self.qm9_dens_path, mol_cd_file)
