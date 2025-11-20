@@ -69,7 +69,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.cutoff = config['hotpp_cutoff']
         self.negative_contributions = config['negative_contributions']
         self.config = config
-        self.use_l1_energy_features = config.get('use_l1_energy_features', False)
+        self.use_l1_energy_features = config.get('use_l1_energy_features')
+        self.l1_energy_out_dim = config.get('l1_energy_out_dim')
         self.train_files = train_files
         self.validation_files = validation_files
         self.test_files = test_files
@@ -86,6 +87,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.val_error_dict = {}
         self.val_iter = 0
         self.energy_dim = config['energy_channel_width']
+        self.energy_coef = config['energy_coef']
         for i, file in enumerate(self.validation_files):
             name = f"Val_file_{i}"
             self.val_error_dict[name] = float("inf")
@@ -114,7 +116,18 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nn.Mish(),
             nn.Linear(self.units * 3, self.units * 3),
         )
-
+        if self.use_l1_energy_features:
+            # To keep the l=1 pathway equivariant we can only apply linear
+            # combinations of the vector channels (shared across coordinates).
+            # Non-zero biases would inject a fixed vector that does not rotate,
+            # so we disable them.
+            self.l1_energy_linear = nn.Linear(
+                self.hotpp_outdim,
+                self.l1_energy_out_dim,
+                bias=False,
+            )
+        else:
+            self.l1_energy_linear = None
         self.precision = torch.float32
         self.energy_conversion_factor = torch.tensor(
             HARTREE_TO_MEV,
@@ -150,7 +163,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.energy_layer_norm = nn.LayerNorm(8 * self.units)
         self.energy_loss_fn = nn.MSELoss()
         #self.energy_loss_fn = self.normalized_l1_loss
-        self.energy_loss_coef = config.get("energy_loss_coef")
         self.energy_loss_history: deque[dict] = deque(maxlen=20)
         base_energy_nan_log_path = config.get("energy_nan_log_path", "energy_nan_debug.txt")
         log_dir, log_filename = os.path.split(base_energy_nan_log_path)
@@ -185,89 +197,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             base = os.path.basename(identifier)
             return base.split(".")[0]
         return f"batch_{batch_idx}"
-
-    @staticmethod
-    def _serialize_tensor(tensor: torch.Tensor | np.ndarray | None) -> dict | None:
-        if tensor is None:
-            return None
-        if isinstance(tensor, torch.Tensor):
-            cpu_tensor = tensor.detach().cpu()
-            return {
-                "shape": list(cpu_tensor.shape),
-                "values": cpu_tensor.reshape(-1).tolist(),
-            }
-        if isinstance(tensor, np.ndarray):
-            return {
-                "shape": list(tensor.shape),
-                "values": tensor.reshape(-1).tolist(),
-            }
-        return {"value": tensor}
-
-    @staticmethod
-    def _serialize_energy(value: torch.Tensor | float | int | None):
-        if value is None:
-            return None
-        if isinstance(value, torch.Tensor):
-            flat = value.detach().cpu().reshape(-1)
-            if flat.numel() == 1:
-                return float(flat.item())
-            return flat.tolist()
-        return float(value)
-
-    def _write_energy_nan_history(self, stage: str) -> None:
-        if not self.energy_loss_history:
-            return
-        log_dir = os.path.dirname(self.energy_nan_log_path)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        with open(self.energy_nan_log_path, "a", encoding="utf-8") as fh:
-            fh.write(
-                f"Energy loss NaN detected during {stage} at step {int(self.global_step)} on {timestamp}.\n"
-            )
-            for entry in self.energy_loss_history:
-                fh.write(json.dumps(entry))
-                fh.write("\n")
-            fh.write("\n")
-
-    def _track_energy_information(
-        self,
-        *,
-        energy_loss: torch.Tensor | None,
-        stage: str,
-        identifier: str | None,
-        batch_idx: int,
-        qm9_mol: Atoms | None,
-        predicted_energy: torch.Tensor | None,
-        target_energy: torch.Tensor | float | None,
-        predicted_density: torch.Tensor | None,
-        target_density: torch.Tensor | np.ndarray | None,
-    ) -> None:
-        if predicted_energy is None or target_energy is None:
-            return
-        record = {
-            "stage": stage,
-            "global_step": int(self.global_step),
-            "batch_index": int(batch_idx),
-            "index": self._get_entry_identifier(identifier, batch_idx),
-            "molecular_formula": qm9_mol.get_chemical_formula() if qm9_mol is not None else None,
-            "predicted_energy": self._serialize_energy(predicted_energy),
-            "target_energy": self._serialize_energy(target_energy),
-            "predicted_density": self._serialize_tensor(predicted_density),
-            "target_density": self._serialize_tensor(target_density),
-        }
-        self.energy_loss_history.append(record)
-        if energy_loss is None:
-            return
-        energy_loss_detached = energy_loss.detach()
-        is_nan = torch.isnan(energy_loss_detached).any().item()
-        if not is_nan:
-            return
-        signature = (stage, int(self.global_step), int(batch_idx))
-        if self._last_energy_nan_signature == signature:
-            return
-        self._write_energy_nan_history(stage)
-        self._last_energy_nan_signature = signature
 
     def forward(self,
                 atoms,
@@ -326,9 +255,22 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #valence_tensor = torch.ones_like(valence_tensor, device=self.device)
         #valence_tensor = at_numbers
         scalar_features = X_scal.view(atom_count, -1)
-        print(scalar_features.shape)
+        #print(scalar_features.shape)
         scalar_features = self.map_to_energy_dim(scalar_features)
-        print(scalar_features.shape)
+        #print(scalar_features.shape)
+
+        l1_scalar_features = None
+        if self.use_l1_energy_features:
+            vec_channels = X_vec.view(atom_count, self.hotpp_outdim, 3)
+            # Apply the shared linear mixing along the channel dimension while
+            # leaving the coordinate axis untouched so the operation commutes
+            # with rigid rotations. The norm over coordinates then produces
+            # rotationally invariant scalars sized by l1_energy_out_dim.
+            mixed_vec = self.l1_energy_linear(vec_channels.transpose(1, 2)).transpose(1, 2)
+            l1_scalar_features = torch.linalg.norm(mixed_vec, dim=-1)
+
+        energy_readout_input = scalar_features if l1_scalar_features is None else torch.cat((scalar_features, l1_scalar_features), dim=-1)
+        print('final shapes are here biitch', scalar_features.shape, l1_scalar_features.shape, energy_readout_input.shape)
         # Compute the element-wise minimum between valence_tensor and fixed_value_tensor
         n_multiples = valence_tensor * self.units
         n_multiples = n_multiples.to(self.device)
@@ -593,31 +535,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 base_mse = self.energy_loss_fn(result['energy'], target_energy)
             except Exception as e:
                 print(e)
-            energy_loss = (
-                base_mse if self.energy_loss_coef is None
-                else self.energy_loss_coef * base_mse
-            )
+            energy_loss = base_mse
 
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
-            print(rmse,'thats rmse brah')
-            print(result['energy'],'predicted energy')
-            print(target_energy,'target energy')
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=base_mse,
-                stage="train",
-                identifier=filename,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
-            )
-            loss = loss + energy_loss
+            print('losses are here biitch',density_loss,energy_loss,self.energy_coef)
+            loss = loss/self.energy_coef + energy_loss
+
+
 
         total_loss = loss.detach()
 
@@ -804,26 +732,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             base_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = (
-                base_mse if self.energy_loss_coef is None
-                else self.energy_loss_coef * base_mse
-            )
+            energy_loss = base_mse
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=base_mse,
-                stage="validation",
-                identifier=mol_cd_file,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
-            )
             loss = loss + energy_loss
 
         total_loss = loss.detach()
@@ -1130,27 +1044,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             base_mse = self.energy_loss_fn(result['energy'], target_energy)
-            energy_loss = (
-                base_mse if self.energy_loss_coef is None
-                else self.energy_loss_coef * base_mse
-            )
+            energy_loss = base_mse
 
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            self._track_energy_information(
-                energy_loss=base_mse,
-                stage="test",
-                identifier=mol_cd_file,
-                batch_idx=batch_idx,
-                qm9_mol=qm9_mol,
-                predicted_energy=result['energy'],
-                target_energy=target_energy,
-                predicted_density=density,
-                target_density=qm9_density,
-            )
             loss = loss + energy_loss
         total_loss = loss.detach()
 
