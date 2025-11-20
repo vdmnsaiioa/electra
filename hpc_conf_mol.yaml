@@ -7,11 +7,11 @@ cbf: False
 activation_type: silu
 plot_gaus_pos: True
 
-max_time: '30:00:00:00'
+max_time: '29:00:00:00'
 #max_time: '00:00:02:00'
 max_epochs: 1000
 
-project_name: electra1
+project_name: electra_gp2
 save_memory: True
 
 MD: False
@@ -24,27 +24,33 @@ MD_Data: False
 pbc: False
 wrap: False
 r_max: 3
-weight_decay: 0.0000
-
+weight_decay: 0
+energy_initial_lr: 0.000004
+energy_weight_decay: 0.0
+split_params: False
+energy_coef: 100
+energy_channel_width: 64
 hotpp_cutoff: 8
 hotpp_outdim: 750
 master_units: 750
-initial_lr: 0.000001
-final_lr: 0.000001
+use_l1_energy_features: True
+l1_energy_out_dim: 64
+initial_lr: 0.000004
+final_lr: 0.000004
 n_warmups: 0
-clip_grad: True
+clip_grad: False
 gradient_clip_value: 0.1
 negative_contributions: True
 use_pos_disp_functions: True
 use_matrix_scalars: True
 gaus_per_electrons: 90
-data_split: "full"
+data_split: "mpfull2025"
 lr_dec_every: 1
-lr_gamma: 0.85
+lr_gamma: 0.8
 qm9_dens_path: /home/scratch3/jels/QM9_Full
 inference_cutoff: 10.0
 hotpp_nlayers: 6
-
+hotpp_csv_dir: /home/energy/s234633/ELECTRA/csvs2
 prune: True
 
 model_type: hotpp
@@ -55,10 +61,11 @@ head_activate_list: ['silu', 'silu', 'silu']
 norm_blocks: 'graph'
 conv_mode: node_j
 update_edge: False
-norm_heads: ['graph', 'graph', 'graph']
+#norm_heads: ['graph', 'graph', 'graph']
+norm_heads: ['graph','graph','graph']
 n_max: 3
 out_max: 3
-embed_type: aufbau
+embed_type: atomic
 precision: float
 
 # MODEL PARAMS
@@ -68,7 +75,6 @@ huber_loss_threshold: 0.1
 reduce_weight_by: 4
 relu: True
 energy_csv: /home/energy/s234633/ELECTRA/data_splits/energies.csv
-energy_loss_coef: 0.05
 
 seed: 505
 n_train_points: 500000
@@ -98,6 +104,7 @@ gaus_pos_path_test: gaussian_positions/test/
 model_dir: /home/energy/s234633/ELECTRA/trained_models
 
 load_model: False
+#load_model_path: /home/energy/s234633/ELECTRA/trained_models/ELECTRA_2025-09-26_snowy-galaxy-91.model_state_dict
 #load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-04-11_polar-glade-110.model_state_dict
 #load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-05-02_true-bee-160.model_state_dict
 
