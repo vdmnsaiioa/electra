@@ -270,7 +270,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
             l1_scalar_features = torch.linalg.norm(mixed_vec, dim=-1)
 
         energy_readout_input = scalar_features if l1_scalar_features is None else torch.cat((scalar_features, l1_scalar_features), dim=-1)
-        print('final shapes are here biitch', scalar_features.shape, l1_scalar_features.shape, energy_readout_input.shape)
+        #print('final shapes are here biitch', scalar_features.shape, l1_scalar_features.shape, energy_readout_input.shape)
         # Compute the element-wise minimum between valence_tensor and fixed_value_tensor
         n_multiples = valence_tensor * self.units
         n_multiples = n_multiples.to(self.device)
@@ -370,7 +370,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         input_l0l1l2 = torch.cat((input_l0l1, det_scal, det_vec, det_tens), dim=-1) # needs 8 on energy
 
         #norm_energy_input = self.energy_layer_norm(energy_input)
-        phi_out = self.phi_network(scalar_features)
+        phi_out = self.phi_network(energy_readout_input)
         pooled = phi_out.sum(dim=0)
         energy = self.rho_network(pooled).squeeze(-1)
         
@@ -543,7 +543,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
             print('losses are here biitch',density_loss,energy_loss,self.energy_coef)
-            loss = loss/self.energy_coef + energy_loss
+            loss = loss + energy_loss*self.energy_coef
+        print('inversion bruh')
 
 
 
