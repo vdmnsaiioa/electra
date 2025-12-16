@@ -1,6 +1,6 @@
 # Multimodal ELECTRA
 
-**Multimodal ELECTRA** is an ongoing research project exploring equivariant graph neural networks for predicting electron density grids and molecular energies from atomic structures. It is an extension of ELECTRA,
+**Multimodal ELECTRA** is an ongoing research project exploring equivariant graph neural networks for predicting electron density grids and molecular energies from atomic structures simultaneously. It is an extension of ELECTRA,
 which is a state of the art model for predicting electron densities only.
 The framework integrates a PyTorch Lightning–based ELECTRA model that constructs neighbor graphs from atomic configurations and learns density reconstruction and energy regression.
 
