@@ -421,6 +421,35 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                           gamma=self.config['lr_gamma'])
         return [optimizer], [lr_scheduler]
 
+    def _log_metrics(self, metrics: dict[str, tuple[torch.Tensor | float, bool]], *, batch_size: int = 1) -> None:
+        """Log metrics once per step and once per epoch without double-counting.
+
+        Args:
+            metrics: Mapping from metric name to a tuple of (value, show_on_prog_bar).
+            batch_size: Batch size for Lightning logging.
+        """
+        for name, (value, prog_bar) in metrics.items():
+            if value is None:
+                continue
+            self.log(
+                f"{name} (step)",
+                value,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=prog_bar,
+                logger=True,
+                batch_size=batch_size,
+            )
+            self.log(
+                name,
+                value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=prog_bar,
+                logger=True,
+                batch_size=batch_size,
+            )
+
     def training_step(self,
                       batch,
                       batch_idx: int):
@@ -563,72 +592,25 @@ class ELECTRA(L.LightningModule, IOMixIn):
             else:
                 print("Non-orthogonal error %: ", np_err)
 
-        self.log("Train Density Err calu %",
-                 np.round(100 * dens_error.detach().cpu().numpy(), 3),
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-        self.log("Train Density Loss",
-                 density_loss.detach(),
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
+        metrics = {
+            "Train Density Err calu %": (np.round(100 * dens_error.detach().cpu().numpy(), 3), True),
+            "Train Density Loss": (density_loss.detach(), False),
+            "Train Total Loss": (total_loss, False),
+        }
         if energy_loss is not None:
-            self.log("Train Energy Loss",
-                     energy_loss.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=True,
-                     logger=True,
-                     batch_size=1)
+            metrics.update({
+                "Train Energy Loss": (energy_loss.detach(), True),
+            })
         if rmse is not None:
-            self.log("Train Energy RMSE",
-                      rmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy RMSE (meV)",
-                      rmse_mev.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy NRMSE",
-                      nrmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy NRMSE (meV)",
-                      nrmse_mev.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Train Energy NL1",
-                      nl1.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            
-        self.log("Train Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
+            metrics.update({
+                "Train Energy RMSE": (rmse.detach(), False),
+                "Train Energy RMSE (meV)": (rmse_mev.detach(), False),
+                "Train Energy NRMSE": (nrmse.detach(), False),
+                "Train Energy NRMSE (meV)": (nrmse_mev.detach(), False),
+                "Train Energy NL1": (nl1.detach(), False),
+            })
+
+        self._log_metrics(metrics)
         
         if batch_idx < self.config['n_warmups']:
             self.optimizers().optimizer.param_groups[0]['lr'] = self.config['final_lr'] *((batch_idx+1)/self.config['n_warmups'])
@@ -744,72 +726,25 @@ class ELECTRA(L.LightningModule, IOMixIn):
         total_loss = loss.detach()
 
         np_err = np.round(100 * density_error.detach().cpu().numpy(), 3)
-        self.log("Validation Density Err %",
-                 np_err,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-        self.log("Validation Density Loss",
-                 density_loss.detach(),
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
-        
-        self.log("Validation Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
+        metrics = {
+            "Validation Density Err %": (np_err, True),
+            "Validation Density Loss": (density_loss.detach(), False),
+            "Validation Total Loss": (total_loss, False),
+        }
         if energy_loss is not None:
-            self.log("Validation Energy Loss",
-                      energy_loss.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=True,
-                      logger=True,
-                      batch_size=1)
+            metrics.update({
+                "Validation Energy Loss": (energy_loss.detach(), True),
+            })
         if rmse is not None:
-            self.log("Validation Energy RMSE",
-                      rmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy RMSE (meV)",
-                      rmse_mev.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy NRMSE",
-                      nrmse.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy NRMSE (meV)",
-                      nrmse_mev.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
-            self.log("Validation Energy NL1",
-                      nl1.detach(),
-                      on_step=True,
-                      on_epoch=True,
-                      prog_bar=False,
-                      logger=True,
-                      batch_size=1)
+            metrics.update({
+                "Validation Energy RMSE": (rmse.detach(), False),
+                "Validation Energy RMSE (meV)": (rmse_mev.detach(), False),
+                "Validation Energy NRMSE": (nrmse.detach(), False),
+                "Validation Energy NRMSE (meV)": (nrmse_mev.detach(), False),
+                "Validation Energy NL1": (nl1.detach(), False),
+            })
+
+        self._log_metrics(metrics)
         if batch_idx == 0 and self.config['save_model']:
             self.model_handler.save(self)
 
@@ -1056,75 +991,26 @@ class ELECTRA(L.LightningModule, IOMixIn):
         total_loss = loss.detach()
 
         np_err = np.round(100 * density_error.detach().cpu().numpy(),3)
-        self.log("Test Density Err %",
-                 np_err,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 batch_size=1)
-
-        self.log("Test Density Loss",
-                 density_loss.detach(),
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
-        
-        self.log("Test Total Loss",
-                 total_loss,
-                 on_step=True,
-                 on_epoch=True,
-                 prog_bar=False,
-                 logger=True,
-                 batch_size=1)
+        metrics = {
+            "Test Density Err %": (np_err, True),
+            "Test Density Loss": (density_loss.detach(), False),
+            "Test Total Loss": (total_loss, False),
+        }
 
         if energy_loss is not None:
-            self.log("Test Energy Loss",
-                     energy_loss.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=True,
-                     logger=True,
-                     batch_size=1)
+            metrics.update({
+                "Test Energy Loss": (energy_loss.detach(), True),
+            })
 
         if rmse is not None:
-            self.log("Test Energy RMSE",
-                     rmse.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy RMSE (meV)",
-                     rmse_mev.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy NRMSE",
-                     nrmse.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy NRMSE (meV)",
-                     nrmse_mev.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
-            self.log("Test Energy NL1",
-                     nl1.detach(),
-                     on_step=True,
-                     on_epoch=True,
-                     prog_bar=False,
-                     logger=True,
-                     batch_size=1)
+            metrics.update({
+                "Test Energy RMSE": (rmse.detach(), False),
+                "Test Energy RMSE (meV)": (rmse_mev.detach(), False),
+                "Test Energy NRMSE": (nrmse.detach(), False),
+                "Test Energy NRMSE (meV)": (nrmse_mev.detach(), False),
+                "Test Energy NL1": (nl1.detach(), False),
+            })
+        self._log_metrics(metrics)
 
         if self.config['construct_test_cd'] and batch_idx % 100 == 0:
             qm9_path = os.path.join(self.qm9_dens_path, mol_cd_file)
