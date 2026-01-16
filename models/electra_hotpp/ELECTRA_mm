@@ -1343,13 +1343,31 @@ class ELECTRA(L.LightningModule, IOMixIn):
                               collate_fn=collate_fn,
                               pin_memory=True,
                               num_workers=0)
-        else:
-            return DataLoader(QM9Dataset(self.validation_files, self.qm9_dens_path, self.config),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
+        if self.config.get("data_split") == "mpfull2025":
+            ds = DensityStream(
+                self.validation_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
+            )
+        return DataLoader(QM9Dataset(self.validation_files, self.qm9_dens_path, self.config),
+                          batch_size=1,
+                          shuffle=False,
+                          collate_fn=collate_fn,
+                          pin_memory=True,
+                          num_workers=0)
 
     def test_dataloader(self):
         if self.config['MD_Data']:
@@ -1361,13 +1379,31 @@ class ELECTRA(L.LightningModule, IOMixIn):
                               collate_fn=collate_fn,
                               pin_memory=True,
                               num_workers=0)
-        else:
-            return DataLoader(QM9Dataset(self.test_files, self.qm9_dens_path, self.config),
-                              batch_size=1,
-                              shuffle=False,
-                              collate_fn=collate_fn,
-                              pin_memory=True,
-                              num_workers=0)
+        if self.config.get("data_split") == "mpfull2025":
+            ds = DensityStream(
+                self.test_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
+            )
+        return DataLoader(QM9Dataset(self.test_files, self.qm9_dens_path, self.config),
+                          batch_size=1,
+                          shuffle=False,
+                          collate_fn=collate_fn,
+                          pin_memory=True,
+                          num_workers=0)
 
     def plot_gaussian_positions(self,
                                 atom_types,
