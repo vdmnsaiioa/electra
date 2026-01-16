@@ -663,6 +663,33 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 self.config["MD_MOL"],
                 "validation",
             )
+            return DataLoader(
+                dataset,
+                batch_size=1,
+                shuffle=False,
+                collate_fn=collate_fn,
+                pin_memory=True,
+                num_workers=0,
+            )
+        if self.config.get("data_split") == "mpfull2025":
+            ds = DensityStream(
+                self.validation_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
+            )
         else:
             dataset = QM9Dataset(
                 self.validation_files,
@@ -686,6 +713,33 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 self.config["MD_ROOT"],
                 self.config["MD_MOL"],
                 "test",
+            )
+            return DataLoader(
+                dataset,
+                batch_size=1,
+                shuffle=False,
+                collate_fn=collate_fn,
+                pin_memory=True,
+                num_workers=0,
+            )
+        if self.config.get("data_split") == "mpfull2025":
+            ds = DensityStream(
+                self.test_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
             )
         else:
             dataset = QM9Dataset(
