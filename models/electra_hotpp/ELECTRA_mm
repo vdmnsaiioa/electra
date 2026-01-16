@@ -1296,7 +1296,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             )
 
         split_name = str(self.config.get("data_split", "")).lower()
-        if split_name in {"mpfull2025", "full"}:
+        if self.config.get("data_split") == "mpfull2025":
+            print('clogger')
             ds = DensityStream(
                 self.train_files,
                 self.dens_path,
