@@ -1278,6 +1278,29 @@ class ELECTRA(L.LightningModule, IOMixIn):
                               conv_mode=self.config['conv_mode'],
                               update_edge=self.config['update_edge'])
 
+    def _stream_loader_kwargs(self):
+        cpu_count = os.cpu_count() or 1
+        default_workers = min(4, max(1, cpu_count // 4))
+        num_workers = int(self.config.get("stream_num_workers", default_workers))
+        num_workers = max(1, num_workers)
+
+        prefetch_factor = int(self.config.get("stream_prefetch_factor", 2))
+        prefetch_factor = max(1, prefetch_factor)
+
+        persistent_workers = bool(self.config.get("stream_persistent_workers", False))
+
+        loader_kwargs = {
+            "batch_size": 1,
+            "collate_fn": collate_fn,
+            "num_workers": num_workers,
+            "pin_memory": True,
+            "worker_init_fn": _dl_worker_init,
+            "multiprocessing_context": "spawn",
+            "persistent_workers": persistent_workers,
+            "prefetch_factor": prefetch_factor,
+        }
+        return loader_kwargs
+
     def train_dataloader(self):
         """Build the training dataloader without triggering density-specific work."""
         if self.config['MD_Data']:
@@ -1303,17 +1326,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 None,
                 shuffle_each_epoch=False,
             )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
+            return DataLoader(ds, **self._stream_loader_kwargs())
 
         dataset = DensityDataset(
             self.train_files,
@@ -1333,25 +1346,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
     def val_dataloader(self):
         if self.config.get("data_split") == "mpfull2025":
-            print('clogger')
             ds = DensityStream(
-                self.train_files,
+                self.validation_files,
                 self.dens_path,
                 self.config,
                 None,
                 shuffle_each_epoch=False,
             )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
+            return DataLoader(ds, **self._stream_loader_kwargs())
         if self.config['MD_Data']:
             return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
                                                   self.config["MD_MOL"],
