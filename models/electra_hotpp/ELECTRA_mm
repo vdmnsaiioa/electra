@@ -1296,7 +1296,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             )
 
         if self.config.get("data_split") == "mpfull2025":
-            print('clogger')
             ds = DensityStream(
                 self.train_files,
                 self.dens_path,
@@ -1304,19 +1303,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 None,
                 shuffle_each_epoch=False,
             )
-            #return DataLoader(
-            #    ds,
-            #    batch_size=1,
-            #    collate_fn=collate_fn,
-            #    num_workers=max(4, os.cpu_count() // 2),
-            #    persistent_workers=True,
-            #    prefetch_factor=8,
-            #    pin_memory=True,
-            #    worker_init_fn=_dl_worker_init,
-            #    multiprocessing_context="spawn",
-            #)
-
-            return DataLoader(ds, **_stream_loader_kwargs(self.config))
+            return DataLoader(
+                ds,
+                batch_size=1,
+                collate_fn=collate_fn,
+                num_workers=max(4, os.cpu_count() // 2),
+                persistent_workers=True,
+                prefetch_factor=8,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                multiprocessing_context="spawn",
+            )
 
         dataset = DensityDataset(
             self.train_files,
@@ -1732,6 +1729,60 @@ class DensityDataset(Dataset):
             energy,
             atom_count,
         )
+
+
+class DensityStream(IterableDataset):
+    """Iterable dataset that shards density files across DataLoader workers."""
+
+    def __init__(self, file_list, dens_path, config, ood_name=None, shuffle_each_epoch=False):
+        self.file_list = list(file_list)
+        self.dens_path = dens_path
+        self.config = config
+        self.ood_name = ood_name
+        self.shuffle_each_epoch = shuffle_each_epoch
+        self.energy_dict, self.atom_count_dict = _load_energy_metadata(config)
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __iter__(self):
+        worker = torch.utils.data.get_worker_info()
+        files = list(self.file_list)
+        if self.shuffle_each_epoch:
+            rng = random.Random(torch.randint(0, 10 ** 9, ()).item())
+            rng.shuffle(files)
+
+        if worker is None:
+            yield from self._iter_files(files)
+        else:
+            per_worker = int((len(files) + worker.num_workers - 1) / worker.num_workers)
+            start = worker.id * per_worker
+            end = min(start + per_worker, len(files))
+            yield from self._iter_files(files[start:end])
+
+    def _iter_files(self, files):
+        for cd_file in files:
+            path = _resolve_density_path(self.dens_path, cd_file)
+            try:
+                density, structure, n_elec, grid_dict = get_density(path)
+                energy, atom_count = _lookup_energy_info(
+                    cd_file,
+                    self.energy_dict,
+                    self.atom_count_dict,
+                )
+                yield (
+                    density,
+                    structure,
+                    n_elec,
+                    grid_dict,
+                    cd_file,
+                    self.ood_name,
+                    energy,
+                    atom_count,
+                )
+            except Exception as exc:
+                print(f"[skip] {cd_file}: {exc}")
+                continue
 
 
 def collate_fn(batch):
