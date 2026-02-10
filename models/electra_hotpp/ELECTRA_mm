@@ -1295,7 +1295,46 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 num_workers=0,
             )
 
-        split_name = str(self.config.get("data_split", "")).lower()
+        if self.config.get("data_split") == "mpfull2025":
+            print('clogger')
+            ds = DensityStream(
+                self.train_files,
+                self.dens_path,
+                self.config,
+                None,
+                shuffle_each_epoch=False,
+            )
+            #return DataLoader(
+            #    ds,
+            #    batch_size=1,
+            #    collate_fn=collate_fn,
+            #    num_workers=max(4, os.cpu_count() // 2),
+            #    persistent_workers=True,
+            #    prefetch_factor=8,
+            #    pin_memory=True,
+            #    worker_init_fn=_dl_worker_init,
+            #    multiprocessing_context="spawn",
+            #)
+
+            return DataLoader(ds, **_stream_loader_kwargs(self.config))
+
+        dataset = DensityDataset(
+            self.train_files,
+            self.dens_path,
+            self.config,
+            None,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            num_workers=0,
+        )
+
+
+    def val_dataloader(self):
         if self.config.get("data_split") == "mpfull2025":
             print('clogger')
             ds = DensityStream(
@@ -1316,24 +1355,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 worker_init_fn=_dl_worker_init,
                 multiprocessing_context="spawn",
             )
-
-        dataset = DensityDataset(
-            self.train_files,
-            self.dens_path,
-            self.config,
-            None,
-        )
-        return DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=False,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            num_workers=0,
-        )
-
-
-    def val_dataloader(self):
         if self.config['MD_Data']:
             return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
                                                   self.config["MD_MOL"],
@@ -1343,31 +1364,20 @@ class ELECTRA(L.LightningModule, IOMixIn):
                               collate_fn=collate_fn,
                               pin_memory=True,
                               num_workers=0)
-        if self.config.get("data_split") == "mpfull2025":
-            ds = DensityStream(
-                self.validation_files,
-                self.dens_path,
-                self.config,
-                None,
-                shuffle_each_epoch=False,
-            )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
-        return DataLoader(QM9Dataset(self.validation_files, self.qm9_dens_path, self.config),
-                          batch_size=1,
-                          shuffle=False,
-                          collate_fn=collate_fn,
-                          pin_memory=True,
-                          num_workers=0)
+        dataset = QM9Dataset(
+            self.validation_files,
+            self.qm9_dens_path,
+            self.config,
+        )
+
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            num_workers=0,
+        )
 
     def test_dataloader(self):
         if self.config['MD_Data']:
@@ -1379,25 +1389,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                               collate_fn=collate_fn,
                               pin_memory=True,
                               num_workers=0)
-        if self.config.get("data_split") == "mpfull2025":
-            ds = DensityStream(
-                self.test_files,
-                self.dens_path,
-                self.config,
-                None,
-                shuffle_each_epoch=False,
-            )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
+
         return DataLoader(QM9Dataset(self.test_files, self.qm9_dens_path, self.config),
                           batch_size=1,
                           shuffle=False,
@@ -1594,6 +1586,36 @@ def _dl_worker_init(_):
     os.environ.setdefault("TMPDIR", "/dev/shm")
     torch.set_num_threads(1)
 
+def _stream_loader_kwargs(config: dict) -> dict:
+    """Build DataLoader kwargs for streamed density reading.
+
+    Density grids are large; aggressive worker/prefetch settings can trigger
+    host-memory OOM before a training step starts. Keep defaults conservative
+    and allow user overrides via config.
+    """
+    worker_count = int(
+        config.get(
+            "stream_num_workers",
+            min(2, max(1, (os.cpu_count() or 1) // 4)),
+        )
+    )
+    prefetch_factor = int(config.get("stream_prefetch_factor", 2))
+
+    kwargs = {
+        "batch_size": 1,
+        "collate_fn": collate_fn,
+        "num_workers": worker_count,
+        "pin_memory": True,
+        "worker_init_fn": _dl_worker_init,
+        "multiprocessing_context": "spawn",
+    }
+
+    if worker_count > 0:
+        kwargs["persistent_workers"] = bool(
+            config.get("stream_persistent_workers", True)
+        )
+        kwargs["prefetch_factor"] = prefetch_factor
+    return kwargs
 
 def _resolve_density_path(root_path: str | None, cd_file: str) -> str:
     """Return an absolute path for a density file regardless of input form."""
@@ -1711,59 +1733,6 @@ class DensityDataset(Dataset):
             atom_count,
         )
 
-
-class DensityStream(IterableDataset):
-    """Iterable dataset that shards density files across DataLoader workers."""
-
-    def __init__(self, file_list, dens_path, config, ood_name=None, shuffle_each_epoch=False):
-        self.file_list = list(file_list)
-        self.dens_path = dens_path
-        self.config = config
-        self.ood_name = ood_name
-        self.shuffle_each_epoch = shuffle_each_epoch
-        self.energy_dict, self.atom_count_dict = _load_energy_metadata(config)
-
-    def __len__(self):
-        return len(self.file_list)
-
-    def __iter__(self):
-        worker = torch.utils.data.get_worker_info()
-        files = list(self.file_list)
-        if self.shuffle_each_epoch:
-            rng = random.Random(torch.randint(0, 10 ** 9, ()).item())
-            rng.shuffle(files)
-
-        if worker is None:
-            yield from self._iter_files(files)
-        else:
-            per_worker = int((len(files) + worker.num_workers - 1) / worker.num_workers)
-            start = worker.id * per_worker
-            end = min(start + per_worker, len(files))
-            yield from self._iter_files(files[start:end])
-
-    def _iter_files(self, files):
-        for cd_file in files:
-            path = _resolve_density_path(self.dens_path, cd_file)
-            try:
-                density, structure, n_elec, grid_dict = get_density(path)
-                energy, atom_count = _lookup_energy_info(
-                    cd_file,
-                    self.energy_dict,
-                    self.atom_count_dict,
-                )
-                yield (
-                    density,
-                    structure,
-                    n_elec,
-                    grid_dict,
-                    cd_file,
-                    self.ood_name,
-                    energy,
-                    atom_count,
-                )
-            except Exception as exc:
-                print(f"[skip] {cd_file}: {exc}")
-                continue
 
 def collate_fn(batch):
     return batch
