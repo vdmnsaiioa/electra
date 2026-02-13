@@ -25,7 +25,7 @@ pbc: False
 wrap: False
 r_max: 3
 weight_decay: 0
-energy_initial_lr: 0.000004
+#energy_initial_lr: 0.000004
 energy_weight_decay: 0.0
 split_params: False
 energy_coef: 10
@@ -35,8 +35,8 @@ hotpp_outdim: 750
 master_units: 750
 use_l1_energy_features: False
 l1_energy_out_dim: 40
-initial_lr: 0.000004
-final_lr: 0.000004
+initial_lr: 0.0000015
+final_lr: 0.0000015
 n_warmups: 0
 clip_grad: False
 gradient_clip_value: 0.1
@@ -103,7 +103,8 @@ gaus_pos_path_test: gaussian_positions/test/
 
 model_dir: /home/energy/s234633/ELECTRA/trained_models
 
-load_model: False
+load_model: True
+load_model_path: /home/energy/s234633/ELECTRA/trained_models/ELECTRA_2026-02-10_amber-brook-64.model_state_dict
 #load_model_path: /home/energy/s234633/ELECTRA/trained_models/ELECTRA_2025-09-26_snowy-galaxy-91.model_state_dict
 #load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-04-11_polar-glade-110.model_state_dict
 #load_model_path: /home/scratch3/jels/ELECTRA_CLEAN/trained_models/ELECTRA_2025-05-02_true-bee-160.model_state_dict
