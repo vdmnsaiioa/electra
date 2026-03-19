@@ -55,6 +55,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.save_args(locals(), kwargs)
         self.activation_type = config['activation_type']
         self.use_l1_energy_features = config.get('use_l1_energy_features', False)
+        self.use_extra_mlp = config['use_extra_mlp']
         self.l1_energy_out_dim = config.get('l1_energy_out_dim', config['hotpp_outdim'])
         self.gaus_per_electrons = config['gaus_per_electrons']
         # Once we drop the valence-based slicing we operate directly on the HOTPP
@@ -83,6 +84,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.gaus_pos_path_test = config['gaus_pos_path_test']
         self.model_handler = model_handler
         self.best_val_loss = float("inf")
+        self.energy_dim = config['energy_channel_width']
         self.val_error_dict = {}
         self.val_iter = 0
         for i, file in enumerate(self.validation_files):
@@ -133,8 +135,14 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 nn.Mish(),
                 nn.Linear(self.units * 3, 27*self.units),
             )
-        energy_readout_in = self.units + (self.l1_energy_out_dim if self.use_l1_energy_features else 0)
+        energy_readout_in = (self.units if not self.use_extra_mlp else self.energy_dim) + (self.l1_energy_out_dim if self.use_l1_energy_features else 0)
         self.energy_readout_in = energy_readout_in
+        self.map_to_energy_dim = nn.Sequential(
+            nn.Linear(self.hotpp_outdim, self.energy_dim),
+            nn.Mish(),
+            nn.Linear(self.energy_dim, self.energy_dim)
+        )
+        
          # Network for predicting molecular energy from scalar features
         self.phi_network = nn.Sequential(
             nn.Linear(self.energy_readout_in, self.energy_readout_in//4), # with only l0 divide by 4
@@ -432,6 +440,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #wsm_ = torch.cat((atom_embeds[:, :self.units], X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         wsm_ = torch.cat((X_scal, X_vec_scal, X_tens_scal), dim=-1).view(n_atoms, -1)
         scalar_features = X_scal.view(n_atoms, -1)
+
+        if self.use_extra_mlp:
+            scalar_features = self.map_to_energy_dim(scalar_features)
+
         l1_scalar_features = None
         if self.use_l1_energy_features:
             vec_channels = X_vec.view(n_atoms, self.units, 3)
@@ -671,31 +683,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 pin_memory=True,
                 num_workers=0,
             )
-        if self.config.get("data_split") == "mpfull2025":
-            ds = DensityStream(
-                self.validation_files,
-                self.dens_path,
-                self.config,
-                None,
-                shuffle_each_epoch=False,
-            )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
-        else:
-            dataset = QM9Dataset(
-                self.validation_files,
-                self.qm9_dens_path,
-                self.config,
-            )
+
+        dataset = QM9Dataset(
+            self.validation_files,
+            self.qm9_dens_path,
+            self.config,
+        )
 
         return DataLoader(
             dataset,
@@ -722,31 +715,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 pin_memory=True,
                 num_workers=0,
             )
-        if self.config.get("data_split") == "mpfull2025":
-            ds = DensityStream(
-                self.test_files,
-                self.dens_path,
-                self.config,
-                None,
-                shuffle_each_epoch=False,
-            )
-            return DataLoader(
-                ds,
-                batch_size=1,
-                collate_fn=collate_fn,
-                num_workers=max(4, os.cpu_count() // 2),
-                persistent_workers=True,
-                prefetch_factor=8,
-                pin_memory=True,
-                worker_init_fn=_dl_worker_init,
-                multiprocessing_context="spawn",
-            )
-        else:
-            dataset = QM9Dataset(
-                self.test_files,
-                self.qm9_dens_path,
-                self.config,
-            )
+        dataset = QM9Dataset(
+            self.test_files,
+            self.qm9_dens_path,
+            self.config,
+        )
 
         return DataLoader(
             dataset,
@@ -756,6 +729,23 @@ class ELECTRA(L.LightningModule, IOMixIn):
             pin_memory=True,
             num_workers=0,
         )
+    
+    def _save_model_checkpoint(self):
+        if not self.config.get('save_model', False):
+            return
+        if self.model_handler is None:
+            logger.warning("save_model=True but model_handler is None; skipping checkpoint save.")
+            return
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None and not getattr(trainer, "is_global_zero", True):
+            return
+
+        self.model_handler.save(self)
+
+    def on_train_epoch_end(self):
+        self._save_model_checkpoint()
+        print('model saved haha')
 
     def training_step(self,
                       batch,
@@ -902,6 +892,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
 
         self._log_metrics(metrics)
+        #if batch_idx == 0 and self.config['save_model']:
+        #    self.model_handler.save(self)
 
         return loss
 
