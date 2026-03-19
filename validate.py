@@ -89,7 +89,7 @@ def run() -> None:
     # Keep validation runs lightweight by default.
     if not args.wandb:
         config["wandb"] = False
-
+    config["save_model"] = False
     set_all_seeds(config["seed"])
     config = set_all_paths(config, wb_run_name=None)
     train_files, test_files, validation_files = get_files(config)
