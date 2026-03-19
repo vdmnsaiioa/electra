@@ -450,6 +450,23 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 batch_size=batch_size,
             )
 
+    def _save_model_checkpoint(self):
+        if not self.config.get('save_model', False):
+            return
+        if self.model_handler is None:
+            logger.warning("save_model=True but model_handler is None; skipping checkpoint save.")
+            return
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None and not getattr(trainer, "is_global_zero", True):
+            return
+
+        self.model_handler.save(self)
+
+    def on_train_epoch_end(self):
+        self._save_model_checkpoint()
+        print('model saved haha')
+
     def training_step(self,
                       batch,
                       batch_idx: int):
@@ -745,8 +762,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
 
         self._log_metrics(metrics)
-        if batch_idx == 0 and self.config['save_model']:
-            self.model_handler.save(self)
+#        if batch_idx == 0 and self.config['save_model']:
+#            self.model_handler.save(self)
 
         if self.config['construct_val_cd'] and batch_idx % 100 == 0:
             construct = True
@@ -799,7 +816,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                              )
         if batch_idx == 0:
             self.val_iter += 1
-
+        
         return loss
 
     def predict_step(self,
@@ -1345,6 +1362,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
 
     def val_dataloader(self):
+
         if self.config.get("data_split") == "mpfull2025":
             ds = DensityStream(
                 self.validation_files,
