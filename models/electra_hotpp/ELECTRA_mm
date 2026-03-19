@@ -565,6 +565,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
+        mae = None
+        mae_mev = None
         rmse = None
         rmse_mev = None
         nrmse = None
@@ -583,6 +585,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 print(e)
             energy_loss = base_mse
 
+            mae = torch.abs(result['energy'] - target_energy)
+            mae_mev = mae * self.energy_conversion_factor.to(mae.device)
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
@@ -620,6 +624,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
         if rmse is not None:
             metrics.update({
+                "Train Energy MAE": (mae.detach(), False),
+                "Train Energy MAE (meV)": (mae_mev.detach(), False),
                 "Train Energy RMSE": (rmse.detach(), False),
                 "Train Energy RMSE (meV)": (rmse_mev.detach(), False),
                 "Train Energy NRMSE": (nrmse.detach(), False),
@@ -722,6 +728,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
+        mae = None
+        mae_mev = None
         rmse = None
         rmse_mev = None
         nrmse = None
@@ -733,6 +741,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
             base_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = base_mse
+            mae = torch.abs(result['energy'] - target_energy)
+            mae_mev = mae * self.energy_conversion_factor.to(mae.device)
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
@@ -754,6 +764,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
         if rmse is not None:
             metrics.update({
+                "Validation Energy MAE": (mae.detach(), False),
+                "Validation Energy MAE (meV)": (mae_mev.detach(), False),
                 "Validation Energy RMSE": (rmse.detach(), False),
                 "Validation Energy RMSE (meV)": (rmse_mev.detach(), False),
                 "Validation Energy NRMSE": (nrmse.detach(), False),
@@ -987,6 +999,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
+        mae = None
+        mae_mev = None
         rmse = None
         rmse_mev = None
         nrmse = None
@@ -999,6 +1013,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             base_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = base_mse
 
+            mae = torch.abs(result['energy'] - target_energy)
+            mae_mev = mae * self.energy_conversion_factor.to(mae.device)
             rmse = torch.sqrt(base_mse)
             rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
             nrmse = rmse / atom_count_t
@@ -1021,6 +1037,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         if rmse is not None:
             metrics.update({
+                "Test Energy MAE": (mae.detach(), False),
+                "Test Energy MAE (meV)": (mae_mev.detach(), False),
                 "Test Energy RMSE": (rmse.detach(), False),
                 "Test Energy RMSE (meV)": (rmse_mev.detach(), False),
                 "Test Energy NRMSE": (nrmse.detach(), False),

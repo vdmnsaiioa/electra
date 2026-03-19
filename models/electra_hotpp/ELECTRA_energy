@@ -782,6 +782,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             else self.energy_loss_coef * base_mse
         )
 
+        mae = torch.abs(predicted_energy - target_energy)
+        mae_mev = mae * self.energy_conversion_factor.to(mae.device)
         rmse = torch.sqrt(base_mse)
         rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
@@ -804,6 +806,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         metrics = {
             "Train Energy Loss": (loss.detach(), True),
+            "Train Energy MAE": (mae.detach(), False),
+            "Train Energy MAE (meV)": (mae_mev.detach(), False),
             "Train Energy RMSE": (rmse.detach(), False),
             "Train Energy RMSE (meV)": (rmse_mev.detach(), False),
         }
@@ -856,6 +860,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             else self.energy_loss_coef * base_mse
         )
 
+        mae = torch.abs(predicted_energy - target_energy)
+        mae_mev = mae * self.energy_conversion_factor.to(mae.device)
         rmse = torch.sqrt(base_mse)
         rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
@@ -878,6 +884,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         metrics = {
             "Validation Energy Loss": (loss.detach(), True),
+            "Validation Energy MAE": (mae.detach(), False),
+            "Validation Energy MAE (meV)": (mae_mev.detach(), False),
             "Validation Energy RMSE": (rmse.detach(), False),
             "Validation Energy RMSE (meV)": (rmse_mev.detach(), False),
         }
@@ -932,6 +940,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             else self.energy_loss_coef * base_mse
         )
 
+        mae = torch.abs(predicted_energy - target_energy)
+        mae_mev = mae * self.energy_conversion_factor.to(mae.device)
         rmse = torch.sqrt(base_mse)
         rmse_mev = rmse * self.energy_conversion_factor.to(rmse.device)
         atom_count_t = None
@@ -954,6 +964,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         metrics = {
             "Test Energy Loss": (loss.detach(), True),
+            "Test Energy MAE": (mae.detach(), False),
+            "Test Energy MAE (meV)": (mae_mev.detach(), False),
             "Test Energy RMSE": (rmse.detach(), False),
             "Test Energy RMSE (meV)": (rmse_mev.detach(), False),
         }
