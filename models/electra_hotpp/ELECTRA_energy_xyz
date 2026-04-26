@@ -203,6 +203,16 @@ class ELECTRA(L.LightningModule, IOMixIn):
             self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
 
+    @staticmethod
+    def _format_structure_for_logging(atoms: Atoms) -> str:
+        """Return an XYZ-like text block for human-readable structure logging."""
+        symbols = atoms.get_chemical_symbols()
+        positions = atoms.get_positions()
+        lines = []
+        for i, (symbol, (x, y, z)) in enumerate(zip(symbols, positions)):
+            lines.append(f"  {i:>2}: {symbol:<2} ({x:>10.6f}, {y:>10.6f}, {z:>10.6f})")
+        return "\n".join(lines)
+
     def _log_metrics(self, metrics: dict[str, tuple[torch.Tensor | float, bool]], *, batch_size: int = 1) -> None:
         """Log metrics once per step and once per epoch without double-counting.
 
@@ -791,6 +801,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         molecule_formula = qm9_mol.get_chemical_formula()
         print(f"[Train] Step {batch_idx}: {molecule_formula}")
+        if batch_idx < 3:
+            structure_text = self._format_structure_for_logging(qm9_mol)
+            print(
+                f"[Train] Epoch {self.current_epoch} Step {batch_idx} structure:\n"
+                f"{structure_text}"
+            )
 
         result = self(qm9_mol, n_elec=qm9_n_elec)
         predicted_energy = result["energy"]
