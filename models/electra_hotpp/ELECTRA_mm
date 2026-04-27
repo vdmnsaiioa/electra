@@ -255,9 +255,9 @@ class ELECTRA(L.LightningModule, IOMixIn):
         #valence_tensor = torch.ones_like(valence_tensor, device=self.device)
         #valence_tensor = at_numbers
         scalar_features = X_scal.view(atom_count, -1)
-        #print(scalar_features.shape)
+        print(scalar_features.shape,'before mapping to energy dim')
         scalar_features = self.map_to_energy_dim(scalar_features)
-        #print(scalar_features.shape)
+        print(scalar_features.shape,'after mapping to energy dim')
 
         l1_scalar_features = None
         if self.use_l1_energy_features:
@@ -421,7 +421,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
                                                            milestones=anneal_milestones,
                                                           gamma=self.config['lr_gamma'])
         return [optimizer], [lr_scheduler]
-
     def _apply_warmup_if_needed(self) -> None:
         """Apply linear warmup for the first N optimizer steps across the whole run."""
         n_warmups = int(self.config.get('n_warmups', 0))
@@ -485,6 +484,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def on_train_epoch_end(self):
         self._save_model_checkpoint()
         print('model saved haha')
+
+    def on_train_epoch_start(self):
+        opt = self.optimizers().optimizer
+        sch = self.lr_schedulers()
+        if isinstance(sch, (list, tuple)):
+            sch = sch[0] if sch else None
+        print(
+            f"[EpochStart] epoch={self.current_epoch} "
+            f"lr={opt.param_groups[0]['lr']:.10e} "
+            f"last_epoch={None if sch is None else sch.last_epoch}"
+        )
 
     def training_step(self,
                       batch,
@@ -653,7 +663,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
 
         self._log_metrics(metrics)
-        self._apply_warmup_if_needed()
+        
+
         return loss
 
     def validation_step(self,
@@ -1370,7 +1381,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 num_workers=0,
             )
 
-        if self.config.get("data_split") == "mpfull2025":
+        if self.config.get("data_split") == "mpfull2025" or self.config.get("data_split") == "mp50%2025" or self.config.get("data_split") == "mp10%2025" or self.config.get("data_split") == "mp1%2025" or self.config.get("data_split") == "mp0.1%2025":
+            print('iacasa')
             ds = DensityStream(
                 self.train_files,
                 self.dens_path,
@@ -1397,16 +1409,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
 
     def val_dataloader(self):
-
-        if self.config.get("data_split") == "mpfull2025":
-            ds = DensityStream(
-                self.validation_files,
-                self.dens_path,
-                self.config,
-                None,
-                shuffle_each_epoch=False,
-            )
-            return DataLoader(ds, **self._stream_loader_kwargs())
         if self.config['MD_Data']:
             return DataLoader(SmallDensityDataset(self.config["MD_ROOT"],
                                                   self.config["MD_MOL"],
