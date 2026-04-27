@@ -416,11 +416,23 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def configure_optimizers(self):
         optimizer = set_optimizer(self, self.config)
         anneal_every = max(1, int(self.config['lr_dec_every']))
-        anneal_milestones = [anneal_every * step for step in range(1, 500)]
-        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                           milestones=anneal_milestones,
-                                                          gamma=self.config['lr_gamma'])
-        return [optimizer], [lr_scheduler]
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=anneal_every,
+            gamma=self.config['lr_gamma'],
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": lr_scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
+
+    def lr_scheduler_step(self, scheduler, metric):
+        """Step LR scheduler explicitly once per epoch."""
+        scheduler.step()
     def _apply_warmup_if_needed(self) -> None:
         """Apply linear warmup for the first N optimizer steps across the whole run."""
         n_warmups = int(self.config.get('n_warmups', 0))
@@ -434,7 +446,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
             return
 
         warmup_scale = float(warmup_step + 1) / float(n_warmups)
-        target_lr = self.config['final_lr'] * warmup_scale
+        target_lr = self.config['initial_lr'] * warmup_scale
         optimizer = self.optimizers().optimizer
         for param_group in optimizer.param_groups:
             param_group['lr'] = target_lr
@@ -490,15 +502,18 @@ class ELECTRA(L.LightningModule, IOMixIn):
         sch = self.lr_schedulers()
         if isinstance(sch, (list, tuple)):
             sch = sch[0] if sch else None
+        scheduler_lr = None if sch is None else sch.get_last_lr()[0]
         print(
             f"[EpochStart] epoch={self.current_epoch} "
             f"lr={opt.param_groups[0]['lr']:.10e} "
+            f"scheduler_lr={scheduler_lr} "
             f"last_epoch={None if sch is None else sch.last_epoch}"
         )
 
     def training_step(self,
                       batch,
                       batch_idx: int):
+        self._apply_warmup_if_needed()
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
         energy = rest[0] if len(rest) > 0 else None
         atom_count = rest[1] if len(rest) > 1 else None
