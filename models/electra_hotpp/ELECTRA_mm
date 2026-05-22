@@ -6,6 +6,7 @@ import json
 import time
 from collections import deque
 import uuid
+import csv
 import wandb
 import logging
 from tools.atom_tools import valence_electrons
@@ -177,6 +178,19 @@ class ELECTRA(L.LightningModule, IOMixIn):
         else:
             self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
+        self.grad_cosine_log_path = config.get(
+            "grad_cosine_log_path",
+            "grad_cosine_similarity.csv",
+        )
+        grad_cosine_dir = os.path.dirname(self.grad_cosine_log_path)
+        if grad_cosine_dir:
+            os.makedirs(grad_cosine_dir, exist_ok=True)
+        if not os.path.exists(self.grad_cosine_log_path):
+            with open(self.grad_cosine_log_path, "w", newline="") as grad_file:
+                writer = csv.writer(grad_file)
+                writer.writerow(
+                    ["global_step", "batch_idx", "filename", "gradient_cosine_similarity"]
+                )
 
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -489,6 +503,46 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         self.model_handler.save(self)
 
+    def _flatten_grads(self, grads: list[torch.Tensor | None]) -> torch.Tensor | None:
+        grad_chunks = [g.reshape(-1) for g in grads if g is not None]
+        if len(grad_chunks) == 0:
+            return None
+        return torch.cat(grad_chunks)
+
+    def _compute_gradient_cosine_similarity(
+        self, density_loss: torch.Tensor, energy_loss: torch.Tensor
+    ) -> torch.Tensor | None:
+        params = [p for p in self.parameters() if p.requires_grad]
+        density_grads = torch.autograd.grad(
+            density_loss,
+            params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        energy_grads = torch.autograd.grad(
+            energy_loss,
+            params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        density_vec = self._flatten_grads(list(density_grads))
+        energy_vec = self._flatten_grads(list(energy_grads))
+        if density_vec is None or energy_vec is None:
+            return None
+        if density_vec.norm() == 0 or energy_vec.norm() == 0:
+            return None
+        return torch.nn.functional.cosine_similarity(
+            density_vec, energy_vec, dim=0, eps=1e-12
+        )
+
+    def _append_grad_cosine_metric(
+        self, batch_idx: int, filename: str, cosine_val: torch.Tensor | None
+    ) -> None:
+        value = float("nan") if cosine_val is None else float(cosine_val.detach().cpu().item())
+        with open(self.grad_cosine_log_path, "a", newline="") as grad_file:
+            writer = csv.writer(grad_file)
+            writer.writerow([int(self.global_step), int(batch_idx), str(filename), value])
+
     def on_train_epoch_end(self):
         self._save_model_checkpoint()
         print('model saved haha')
@@ -603,6 +657,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
+        grad_cosine = None
         mae = None
         mae_mev = None
         rmse = None
@@ -630,8 +685,12 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
+            grad_cosine = self._compute_gradient_cosine_similarity(density_loss, energy_loss)
+            self._append_grad_cosine_metric(batch_idx=batch_idx, filename=filename, cosine_val=grad_cosine)
             print('losses are here biitch',density_loss,energy_loss,self.energy_coef)
             loss = loss + energy_loss*self.energy_coef
+        else:
+            self._append_grad_cosine_metric(batch_idx=batch_idx, filename=filename, cosine_val=None)
         print('inversion bruh')
 
 
@@ -659,6 +718,10 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if energy_loss is not None:
             metrics.update({
                 "Train Energy Loss": (energy_loss.detach(), True),
+            })
+        if grad_cosine is not None:
+            metrics.update({
+                "Train Grad Cosine (density vs energy)": (grad_cosine.detach(), False),
             })
         if rmse is not None:
             metrics.update({
