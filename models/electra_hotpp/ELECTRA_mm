@@ -503,19 +503,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         self.model_handler.save(self)
 
-    def _flatten_grads(
-        self, grads: list[torch.Tensor | None], params: list[torch.Tensor]
-    ) -> torch.Tensor | None:
-        grad_chunks = []
-        for grad, param in zip(grads, params):
-            if grad is None:
-                grad_chunks.append(torch.zeros_like(param, memory_format=torch.preserve_format).reshape(-1))
-            else:
-                grad_chunks.append(grad.reshape(-1))
-        if len(grad_chunks) == 0:
-            return None
-        return torch.cat(grad_chunks)
-
     def _compute_gradient_cosine_similarity(
         self, density_loss: torch.Tensor, energy_loss: torch.Tensor
     ) -> torch.Tensor | None:
@@ -532,15 +519,30 @@ class ELECTRA(L.LightningModule, IOMixIn):
             retain_graph=True,
             allow_unused=True,
         )
-        density_vec = self._flatten_grads(list(density_grads), params)
-        energy_vec = self._flatten_grads(list(energy_grads), params)
-        if density_vec is None or energy_vec is None:
+        dot = None
+        density_norm_sq = None
+        energy_norm_sq = None
+        for density_grad, energy_grad, param in zip(density_grads, energy_grads, params):
+            dg = density_grad if density_grad is not None else torch.zeros_like(param)
+            eg = energy_grad if energy_grad is not None else torch.zeros_like(param)
+            term_dot = torch.sum(dg * eg)
+            term_density_norm_sq = torch.sum(dg * dg)
+            term_energy_norm_sq = torch.sum(eg * eg)
+            if dot is None:
+                dot = term_dot
+                density_norm_sq = term_density_norm_sq
+                energy_norm_sq = term_energy_norm_sq
+            else:
+                dot = dot + term_dot
+                density_norm_sq = density_norm_sq + term_density_norm_sq
+                energy_norm_sq = energy_norm_sq + term_energy_norm_sq
+        if dot is None or density_norm_sq is None or energy_norm_sq is None:
             return None
-        if density_vec.norm() == 0 or energy_vec.norm() == 0:
+        density_norm = torch.sqrt(density_norm_sq)
+        energy_norm = torch.sqrt(energy_norm_sq)
+        if density_norm.item() == 0.0 or energy_norm.item() == 0.0:
             return None
-        return torch.nn.functional.cosine_similarity(
-            density_vec, energy_vec, dim=0, eps=1e-12
-        )
+        return dot / (density_norm * energy_norm + 1e-12)
 
     def _append_grad_cosine_metric(
         self, batch_idx: int, filename: str, cosine_val: torch.Tensor | None
