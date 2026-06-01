@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import deque
 import uuid
@@ -88,6 +89,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self.val_iter = 0
         self.energy_dim = config['energy_channel_width']
         self.energy_coef = config['energy_coef']
+        self.use_fraction_of_density = bool(config.get('use_fraction_of_density', False))
+        self.indices_for_density = {int(idx) for idx in config.get('indices_for_density', [])}
         for i, file in enumerate(self.validation_files):
             name = f"Val_file_{i}"
             self.val_error_dict[name] = float("inf")
@@ -197,6 +200,23 @@ class ELECTRA(L.LightningModule, IOMixIn):
             base = os.path.basename(identifier)
             return base.split(".")[0]
         return f"batch_{batch_idx}"
+
+    def _get_density_fraction_index(self, identifier: str | None) -> int | None:
+        if identifier is None:
+            return None
+        base = os.path.basename(identifier)
+        stem = base.split(".")[0]
+        try:
+            return int(stem)
+        except ValueError:
+            match = re.search(r"\d+", stem)
+            return int(match.group(0)) if match else None
+
+    def _should_compute_training_density(self, identifier: str | None) -> bool:
+        if not self.use_fraction_of_density:
+            return True
+        density_index = self._get_density_fraction_index(identifier)
+        return density_index in self.indices_for_density
 
     def forward(self,
                 atoms,
@@ -484,96 +504,110 @@ class ELECTRA(L.LightningModule, IOMixIn):
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
         energy = rest[0] if len(rest) > 0 else None
         atom_count = rest[1] if len(rest) > 1 else None
+        compute_density = self._should_compute_training_density(filename)
 
         molecule_formula = qm9_mol.get_chemical_formula()
         print(f"[Train] Step {batch_idx}: {molecule_formula}")
+        if self.use_fraction_of_density:
+            density_index = self._get_density_fraction_index(filename)
+            print(
+                f"[Train] Density fraction index={density_index} "
+                f"compute_density={compute_density}"
+            )
 
-        if pos_grid is None:
-            pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
-            pos_grid = pos_grid.to(self.device)
-        atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
         start = time.time()
         result = self(qm9_mol, n_elec=qm9_n_elec)
-        cell = result['cell']
-        weights = result['weights']
-        pos_disp = result['pos_disp']
-        image_weights = result['image_weights']
-        X = result['cov']
-        scalar_mults = result['scal_mults']
-        n_multiples = result['n_multiples']
-        if not self.config['negative_contributions']:
-            scalar_mults = None
-        weights = weights.reshape(weights.shape[0], 1, 1)
 
-        n_multiples = n_multiples.to(self.device)
-        atom_positions = atom_positions.to(self.device)
-        atom_positions = atom_positions.reshape(n_multiples.shape[0], -1)
-        pos_tens_orig = atom_positions.repeat_interleave(n_multiples, 0).view(-1, 3)
-        pos_tens_orig = pos_tens_orig.to(self.device)
-        gaus_pos = pos_tens_orig + pos_disp
+        loss = None
+        dens_error = None
+        density_loss = None
+        mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3 if self.config['MD_Data'] else None
 
-        sys_dist = gto(
-            pos=atom_positions,
-            pos_disp=pos_disp,
-            cov=X,
-            scales=weights,
-            scalar_mults=scalar_mults,
-            n_multiples=n_multiples,
-            relu=self.config['relu'],
-            cell = cell,
-            device=self.device,
-            image_weights=image_weights)
-        if not self.config['train_sample_all']:
-            density, sampled_points = get_n_points_dens(atom_dist=sys_dist,
-                                                        pos_grid=pos_grid,
-                                                        gaus_pos=gaus_pos,
-                                                        n_multiples=result['n_multiples'],
-                                                        n_points=self.config['n_train_points'],
-                                                        sample_all=self.config['train_sample_all'],
-                                                        cell = cell)
-        else:
-            if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
-                density, _ = get_n_points_dens(atom_dist=sys_dist,
-                                               pos_grid=pos_grid,
-                                               gaus_pos=gaus_pos,
-                                               n_multiples=result['n_multiples'],
-                                               n_points=self.config['n_split_points'],
-                                               sample_all=True,
-                                               cell = cell)
+        if compute_density:
+            if pos_grid is None:
+                pos_grid = grid2pos(qm9_mol, qm9_grid_dict)
+                pos_grid = pos_grid.to(self.device)
+            atom_positions = torch.tensor(qm9_mol.positions, device=self.device)
+            cell = result['cell']
+            weights = result['weights']
+            pos_disp = result['pos_disp']
+            image_weights = result['image_weights']
+            X = result['cov']
+            scalar_mults = result['scal_mults']
+            n_multiples = result['n_multiples']
+            if not self.config['negative_contributions']:
+                scalar_mults = None
+            weights = weights.reshape(weights.shape[0], 1, 1)
+
+            n_multiples = n_multiples.to(self.device)
+            atom_positions = atom_positions.to(self.device)
+            atom_positions = atom_positions.reshape(n_multiples.shape[0], -1)
+            pos_tens_orig = atom_positions.repeat_interleave(n_multiples, 0).view(-1, 3)
+            pos_tens_orig = pos_tens_orig.to(self.device)
+            gaus_pos = pos_tens_orig + pos_disp
+
+            sys_dist = gto(
+                pos=atom_positions,
+                pos_disp=pos_disp,
+                cov=X,
+                scales=weights,
+                scalar_mults=scalar_mults,
+                n_multiples=n_multiples,
+                relu=self.config['relu'],
+                cell=cell,
+                device=self.device,
+                image_weights=image_weights)
+            if not self.config['train_sample_all']:
+                density, sampled_points = get_n_points_dens(atom_dist=sys_dist,
+                                                            pos_grid=pos_grid,
+                                                            gaus_pos=gaus_pos,
+                                                            n_multiples=result['n_multiples'],
+                                                            n_points=self.config['n_train_points'],
+                                                            sample_all=self.config['train_sample_all'],
+                                                            cell=cell)
             else:
-                density = get_full_grid_dens(atom_dist=sys_dist,
-                                             gaus_pos=gaus_pos,
-                                             n_multiples=result['n_multiples'],
-                                             pos_grid=pos_grid)
-            sampled_points = None
-        if self.config['relu']:
-            density = torch.relu(density)
-        if self.config['MD_Data']:
-            mol_volume = (BOHR_TO_ANGSTROM * 20.0) ** 3
+                if pos_grid.flatten().size()[0] > self.config['max_grid_points']:
+                    density, _ = get_n_points_dens(atom_dist=sys_dist,
+                                                   pos_grid=pos_grid,
+                                                   gaus_pos=gaus_pos,
+                                                   n_multiples=result['n_multiples'],
+                                                   n_points=self.config['n_split_points'],
+                                                   sample_all=True,
+                                                   cell=cell)
+                else:
+                    density = get_full_grid_dens(atom_dist=sys_dist,
+                                                 gaus_pos=gaus_pos,
+                                                 n_multiples=result['n_multiples'],
+                                                 pos_grid=pos_grid)
+                sampled_points = None
+            if self.config['relu']:
+                density = torch.relu(density)
+            density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
+                                                       density=density,
+                                                       qm9_density=qm9_density,
+                                                       grid_dict=qm9_grid_dict,
+                                                       sys=qm9_mol,
+                                                       points=sampled_points,
+                                                       mol_volume=mol_volume)
+            loss, dens_error = self.loss.compute_total_loss(
+                sys=qm9_mol,
+                pred_cd=density,
+                true_cd_tens=qm9_density,
+                grid_dict=qm9_grid_dict,
+                n_valence_electrons=n_val_elec,
+                sampled_points=sampled_points,
+                training=True,
+                mol_volume=mol_volume,
+            )
+            density_loss = loss
         else:
-            mol_volume = None
-        density, n_val_elec, _ = normalize_density(n_elec=qm9_n_elec,
-                                                   density=density,
-                                                   qm9_density=qm9_density,
-                                                   grid_dict=qm9_grid_dict,
-                                                   sys=qm9_mol,
-                                                   points=sampled_points,
-                                                   mol_volume=mol_volume)
+            print(f"[Train] Skipping density prediction and density loss for {filename}")
+
         end = time.time()
         if self.config['wandb']:
             wandb.log({"Forward Time": end - start})
         else:
             print("Forward Time: ", end - start)
-        loss, dens_error = self.loss.compute_total_loss(
-            sys=qm9_mol,
-            pred_cd=density,
-            true_cd_tens=qm9_density,
-            grid_dict=qm9_grid_dict,
-            n_valence_electrons=n_val_elec,
-            sampled_points=sampled_points,
-            training=True,
-            mol_volume=mol_volume,
-        )
 
         energy_loss = None
         mae = None
@@ -583,17 +617,13 @@ class ELECTRA(L.LightningModule, IOMixIn):
         nrmse = None
         nrmse_mev = None
         nl1 = None
-        density_loss = loss
         print(filename)
         if energy is None:
             print('not good')
         if energy is not None and atom_count is not None:
             target_energy = torch.tensor(energy, dtype=result['energy'].dtype, device=self.device)
             atom_count_t = torch.tensor(atom_count, dtype=result['energy'].dtype, device=self.device)
-            try:
-                base_mse = self.energy_loss_fn(result['energy'], target_energy)
-            except Exception as e:
-                print(e)
+            base_mse = self.energy_loss_fn(result['energy'], target_energy)
             energy_loss = base_mse
 
             mae = torch.abs(result['energy'] - target_energy)
@@ -603,32 +633,39 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            print('losses are here biitch',density_loss,energy_loss,self.energy_coef)
-            loss = loss + energy_loss*self.energy_coef
+            print('losses are here biitch', density_loss, energy_loss, self.energy_coef)
+            if compute_density:
+                loss = loss + energy_loss * self.energy_coef
+            else:
+                loss = energy_loss
+        elif not compute_density:
+            raise ValueError(
+                "Energy and atom_count must be available when density prediction is skipped."
+            )
         print('inversion bruh')
-
-
 
         total_loss = loss.detach()
 
-        np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
-        if self.config['crystal']:
-            cell = qm9_mol.get_cell()
-            cell_t = torch.tensor(cell, dtype=torch.float, device=self.device)  # shape (3,3)
-            tol = 1e-8
-            diag = torch.diag(torch.diagonal(cell_t))
-            offdiag = (cell_t - diag).abs().max()
-            is_ortho = offdiag < tol
-            if is_ortho:
-                print("Orthogonal error %: ", np_err)
-            else:
-                print("Non-orthogonal error %: ", np_err)
-
         metrics = {
-            "Train Density Err calu %": (np.round(100 * dens_error.detach().cpu().numpy(), 3), True),
-            "Train Density Loss": (density_loss.detach(), False),
             "Train Total Loss": (total_loss, False),
         }
+        if density_loss is not None:
+            np_err = np.round(100 * dens_error.detach().cpu().numpy(), 3)
+            if self.config['crystal']:
+                cell = qm9_mol.get_cell()
+                cell_t = torch.tensor(cell, dtype=torch.float, device=self.device)  # shape (3,3)
+                tol = 1e-8
+                diag = torch.diag(torch.diagonal(cell_t))
+                offdiag = (cell_t - diag).abs().max()
+                is_ortho = offdiag < tol
+                if is_ortho:
+                    print("Orthogonal error %: ", np_err)
+                else:
+                    print("Non-orthogonal error %: ", np_err)
+            metrics.update({
+                "Train Density Err calu %": (np_err, True),
+                "Train Density Loss": (density_loss.detach(), False),
+            })
         if energy_loss is not None:
             metrics.update({
                 "Train Energy Loss": (energy_loss.detach(), True),
@@ -645,7 +682,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
             })
 
         self._log_metrics(metrics)
-        
 
         return loss
 
