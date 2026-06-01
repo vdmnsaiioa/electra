@@ -1,3 +1,4 @@
+# this model implements LayerNorm !!
 
 from __future__ import annotations
 
@@ -5,7 +6,6 @@ import json
 import time
 from collections import deque
 import uuid
-import csv
 import wandb
 import logging
 from tools.atom_tools import valence_electrons
@@ -177,19 +177,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         else:
             self.energy_nan_log_path = new_filename
         self._last_energy_nan_signature: tuple[str, int, int] | None = None
-        self.grad_cosine_log_path = config.get(
-            "grad_cosine_log_path",
-            "grad_cosine_similarity.csv",
-        )
-        grad_cosine_dir = os.path.dirname(self.grad_cosine_log_path)
-        if grad_cosine_dir:
-            os.makedirs(grad_cosine_dir, exist_ok=True)
-        if not os.path.exists(self.grad_cosine_log_path):
-            with open(self.grad_cosine_log_path, "w", newline="") as grad_file:
-                writer = csv.writer(grad_file)
-                writer.writerow(
-                    ["global_step", "batch_idx", "filename", "gradient_cosine_similarity"]
-                )
 
     @staticmethod
     def normalized_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -428,37 +415,11 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
     def configure_optimizers(self):
         optimizer = set_optimizer(self, self.config)
-        anneal_every = max(1, int(self.config['lr_dec_every']))
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=anneal_every,
-            gamma=self.config['lr_gamma'],
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": lr_scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
-        }
-    def _apply_warmup_if_needed(self) -> None:
-        """Apply linear warmup for the first N optimizer steps across the whole run."""
-        n_warmups = int(self.config.get('n_warmups', 0))
-        if n_warmups <= 0:
-            return
-
-        # Use global_step so warmup happens once for the full training run,
-        # not once per epoch.
-        warmup_step = int(self.global_step)
-        if warmup_step >= n_warmups:
-            return
-
-        warmup_scale = float(warmup_step + 1) / float(n_warmups)
-        target_lr = self.config['initial_lr'] * warmup_scale
-        optimizer = self.optimizers().optimizer
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = target_lr
+        anneal_milestones = list(self.config['lr_dec_every'] * np.arange(1, 500))
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                           milestones=anneal_milestones,
+                                                          gamma=self.config['lr_gamma'])
+        return [optimizer], [lr_scheduler]
 
     def _log_metrics(self, metrics: dict[str, tuple[torch.Tensor | float, bool]], *, batch_size: int = 1) -> None:
         """Log metrics once per step and once per epoch without double-counting.
@@ -502,55 +463,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
 
         self.model_handler.save(self)
 
-    def _compute_gradient_cosine_similarity(
-        self, density_loss: torch.Tensor, energy_loss: torch.Tensor
-    ) -> torch.Tensor | None:
-        params = [p for p in self.parameters() if p.requires_grad]
-        density_grads = torch.autograd.grad(
-            density_loss,
-            params,
-            retain_graph=True,
-            allow_unused=True,
-        )
-        energy_grads = torch.autograd.grad(
-            energy_loss,
-            params,
-            retain_graph=True,
-            allow_unused=True,
-        )
-        dot = None
-        density_norm_sq = None
-        energy_norm_sq = None
-        for density_grad, energy_grad, param in zip(density_grads, energy_grads, params):
-            dg = density_grad if density_grad is not None else torch.zeros_like(param)
-            eg = energy_grad if energy_grad is not None else torch.zeros_like(param)
-            term_dot = torch.sum(dg * eg)
-            term_density_norm_sq = torch.sum(dg * dg)
-            term_energy_norm_sq = torch.sum(eg * eg)
-            if dot is None:
-                dot = term_dot
-                density_norm_sq = term_density_norm_sq
-                energy_norm_sq = term_energy_norm_sq
-            else:
-                dot = dot + term_dot
-                density_norm_sq = density_norm_sq + term_density_norm_sq
-                energy_norm_sq = energy_norm_sq + term_energy_norm_sq
-        if dot is None or density_norm_sq is None or energy_norm_sq is None:
-            return None
-        density_norm = torch.sqrt(density_norm_sq)
-        energy_norm = torch.sqrt(energy_norm_sq)
-        if density_norm.item() == 0.0 or energy_norm.item() == 0.0:
-            return None
-        return dot / (density_norm * energy_norm + 1e-12)
-
-    def _append_grad_cosine_metric(
-        self, batch_idx: int, filename: str, cosine_val: torch.Tensor | None
-    ) -> None:
-        value = float("nan") if cosine_val is None else float(cosine_val.detach().cpu().item())
-        with open(self.grad_cosine_log_path, "a", newline="") as grad_file:
-            writer = csv.writer(grad_file)
-            writer.writerow([int(self.global_step), int(batch_idx), str(filename), value])
-
     def on_train_epoch_end(self):
         self._save_model_checkpoint()
         print('model saved haha')
@@ -569,7 +481,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
     def training_step(self,
                       batch,
                       batch_idx: int):
-        self._apply_warmup_if_needed()
         qm9_density, qm9_mol, qm9_n_elec, qm9_grid_dict, filename, pos_grid, *rest = batch[0]
         energy = rest[0] if len(rest) > 0 else None
         atom_count = rest[1] if len(rest) > 1 else None
@@ -665,7 +576,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         )
 
         energy_loss = None
-        grad_cosine = None
         mae = None
         mae_mev = None
         rmse = None
@@ -693,12 +603,8 @@ class ELECTRA(L.LightningModule, IOMixIn):
             nrmse = rmse / atom_count_t
             nrmse_mev = nrmse * self.energy_conversion_factor.to(nrmse.device)
             nl1 = torch.abs(result['energy'] - target_energy) / atom_count_t
-            grad_cosine = self._compute_gradient_cosine_similarity(density_loss, energy_loss)
-            self._append_grad_cosine_metric(batch_idx=batch_idx, filename=filename, cosine_val=grad_cosine)
             print('losses are here biitch',density_loss,energy_loss,self.energy_coef)
             loss = loss + energy_loss*self.energy_coef
-        else:
-            self._append_grad_cosine_metric(batch_idx=batch_idx, filename=filename, cosine_val=None)
         print('inversion bruh')
 
 
@@ -726,10 +632,6 @@ class ELECTRA(L.LightningModule, IOMixIn):
         if energy_loss is not None:
             metrics.update({
                 "Train Energy Loss": (energy_loss.detach(), True),
-            })
-        if grad_cosine is not None:
-            metrics.update({
-                "Train Grad Cosine (density vs energy)": (grad_cosine.detach(), False),
             })
         if rmse is not None:
             metrics.update({
