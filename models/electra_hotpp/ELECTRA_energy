@@ -631,7 +631,7 @@ class ELECTRA(L.LightningModule, IOMixIn):
                 num_workers=0,
             )
 
-        if self.config.get("data_split") == "mpfull2025":
+        if self.config.get("data_split") == "mpfull2025" or self.config.get("data_split") == "mp50%2025" or self.config.get("data_split") == "mp10%2025" or self.config.get("data_split") == "mp1%2025" or self.config.get("data_split") == "mp0.1%2025":
             print('clogger')
             ds = DensityStream(
                 self.train_files,
@@ -747,6 +747,17 @@ class ELECTRA(L.LightningModule, IOMixIn):
         self._save_model_checkpoint()
         print('model saved haha')
 
+    def on_train_epoch_start(self):
+        opt = self.optimizers().optimizer
+        sch = self.lr_schedulers()
+        if isinstance(sch, (list, tuple)):
+            sch = sch[0] if sch else None
+        print(
+            f"[EpochStart] epoch={self.current_epoch} "
+            f"lr={opt.param_groups[0]['lr']:.10e} "
+            f"last_epoch={None if sch is None else sch.last_epoch}"
+        )
+        
     def training_step(self,
                       batch,
                       batch_idx: int):
