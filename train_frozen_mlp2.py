@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging even if wandb is true in config.")
     parser.add_argument("--save_path", type=Path, default=None, help="Optional path for the trained linear readout state dict.")
+    parser.add_argument("--feature_cache", type=Path, default=None, help="Optional torch feature cache produced by extract_frozen_features.py.")
     return parser.parse_args()
 
 
@@ -146,6 +147,33 @@ class EnergySplitDataset(Dataset):
             "Could not load any molecule from this split; first error was: "
             f"{first_error}"
         )
+
+
+class CachedFeatureDataset(Dataset):
+    """Dataset backed by precomputed frozen-base molecule features."""
+
+    def __init__(self, cache: dict[str, Any], split: str):
+        self.features = cache["features"]
+        self.samples = [sample for sample in cache["samples"] if sample["split"] == split]
+        if not self.samples:
+            raise RuntimeError(f"No cached samples found for split '{split}'.")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        sample = self.samples[index]
+        feature_index = int(sample["feature_index"])
+        features = self.features[feature_index].to(torch.float32)
+        if sample["energy"] is None:
+            raise RuntimeError(f"Cached sample {sample['key']} in split {sample['split']} does not have an energy target.")
+        target = torch.tensor([float(sample["energy"])], dtype=torch.float32)
+        return features, target, sample["key"]
+
+
+def collate_cached(batch):
+    features, targets, keys = zip(*batch)
+    return torch.stack(features, dim=0), torch.stack(targets, dim=0), list(keys)
 
 
 def collate_single(batch):
@@ -240,14 +268,22 @@ def evaluate_mae(base_model: nn.Module, readout: nn.Module, loader: DataLoader, 
     return torch.cat(errors).mean().item()
 
 
-def main() -> None:
-    args = parse_args()
-    config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+def evaluate_cached_mae(readout: nn.Module, loader: DataLoader, device: torch.device) -> float:
+    readout.eval()
+    errors: list[torch.Tensor] = []
+    with torch.no_grad():
+        for features, target, _keys in loader:
+            features = features.to(device)
+            target = target.to(device)
+            pred = readout(features)
+            errors.append(torch.abs(pred.view_as(target) - target).cpu())
+    return torch.cat(errors).mean().item()
+
+
+def load_frozen_base_model(config: dict[str, Any], device: torch.device):
     if not config.get("load_model_path"):
         raise ValueError("Config must define load_model_path for the trained ELECTRA_mm checkpoint.")
 
-    set_all_seeds(int(config.get("seed", 0)))
-    device = torch.device(args.device)
     ELECTRA = load_electra_mm_class()
     model = ELECTRA(train_files=[], test_files=[], validation_files=[], model_handler=None, config=config).to(device)
 
@@ -262,20 +298,42 @@ def main() -> None:
         model.emb_layer.eval()
         for parameter in model.emb_layer.parameters():
             parameter.requires_grad_(False)
+    return model.base_model
 
-    energy_map = load_energy_map(Path(config["energy_csv"]))
-    train_dataset = EnergySplitDataset(config, "train", energy_map)
-    val_dataset = EnergySplitDataset(config, "validation", energy_map)
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=args.num_workers, collate_fn=collate_single)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=collate_single)
 
-    first_atoms, _target, _key = train_dataset[0]
-    feature_dim = molecule_features(model.base_model, first_atoms, config, device).numel()
+def main() -> None:
+    args = parse_args()
+    config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+
+    set_all_seeds(int(config.get("seed", 0)))
+    device = torch.device(args.device)
+    base_model = None
+    cached_training = args.feature_cache is not None
+
+    if cached_training:
+        cache = torch.load(args.feature_cache, map_location="cpu")
+        print(f"Loaded frozen feature cache from {args.feature_cache}")
+        print(f"Cached samples: {len(cache['samples'])} | feature_dim={cache['feature_dim']}")
+        train_dataset = CachedFeatureDataset(cache, "train")
+        val_dataset = CachedFeatureDataset(cache, "validation")
+        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=args.num_workers, collate_fn=collate_cached)
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=collate_cached)
+        feature_dim = int(cache["feature_dim"])
+    else:
+        base_model = load_frozen_base_model(config, device)
+        energy_map = load_energy_map(Path(config["energy_csv"]))
+        train_dataset = EnergySplitDataset(config, "train", energy_map)
+        val_dataset = EnergySplitDataset(config, "validation", energy_map)
+        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=args.num_workers, collate_fn=collate_single)
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=collate_single)
+
+        first_atoms, _target, _key = train_dataset[0]
+        feature_dim = molecule_features(base_model, first_atoms, config, device).numel()
+
     readout = nn.Sequential(
-    #nn.Linear(feature_dim, 128),
-    nn.Linear(750,128),
-    nn.SiLU(),
-    nn.Linear(128, 1),
+        nn.Linear(feature_dim, 128),
+        nn.SiLU(),
+        nn.Linear(128, 1),
     ).to(device)
     optimizer = torch.optim.AdamW(readout.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
@@ -285,7 +343,7 @@ def main() -> None:
     if use_wandb:
         import wandb
 
-        wandb_run = wandb.init(project=config.get("project_name", "ELECTRA_mm_energy_readout"), config={**config, "readout_epochs": args.epochs, "readout_lr": args.lr})
+        wandb_run = wandb.init(project=config.get("project_name", "ELECTRA_mm_energy_readout"), config={**config, "readout_epochs": args.epochs, "readout_lr": args.lr, "feature_cache": str(args.feature_cache) if args.feature_cache else None})
 
     global_step = 0
 
@@ -293,10 +351,16 @@ def main() -> None:
         readout.train()
         abs_errors: list[float] = []
 
-        for step, (atoms, target, _key) in enumerate(train_loader):
+        for step, batch in enumerate(train_loader):
+            if cached_training:
+                features, target, _keys = batch
+                features = features.to(device)
+            else:
+                atoms, target, _key = batch
+                if base_model is None:
+                    raise RuntimeError("base_model must be loaded when not using --feature_cache.")
+                features = molecule_features(base_model, atoms, config, device).unsqueeze(0)
             target = target.to(device)
-            features = molecule_features(model.base_model, atoms, config, device).unsqueeze(0)
-            print(features.shape)
             pred = readout(features)
 
             loss = loss_fn(pred.view_as(target), target)
@@ -306,13 +370,8 @@ def main() -> None:
             optimizer.step()
 
             batch_mae = torch.abs(pred.detach().view_as(target) - target).mean().item()
-            print("-----------------")
-            print('predicted:', pred.detach().view_as(target))
-            print('target:', target)
-            print("-----------------")
             abs_errors.append(batch_mae)
 
-            # STEPWISE LOGGING GOES HERE
             if wandb_run is not None:
                 wandb_run.log(
                     {
@@ -345,7 +404,12 @@ def main() -> None:
                 step=global_step,
             )
 
-    val_mae = evaluate_mae(model.base_model, readout, val_loader, config, device)
+    if cached_training:
+        val_mae = evaluate_cached_mae(readout, val_loader, device)
+    else:
+        if base_model is None:
+            raise RuntimeError("base_model must be loaded when not using --feature_cache.")
+        val_mae = evaluate_mae(base_model, readout, val_loader, config, device)
     print(f"validation_mae={val_mae:.8f}", flush=True)
     if wandb_run is not None:
         wandb_run.log({"validation_mae": val_mae})
@@ -353,9 +417,8 @@ def main() -> None:
 
     save_path = args.save_path or Path(config.get("model_dir", ".")) / "frozen_base_energy_readout.pt"
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"readout_state_dict": readout.state_dict(), "feature_dim": feature_dim, "config_path": str(args.config)}, save_path)
+    torch.save({"readout_state_dict": readout.state_dict(), "feature_dim": feature_dim, "config_path": str(args.config), "feature_cache": str(args.feature_cache) if args.feature_cache else None}, save_path)
     print(f"Saved readout to {save_path}")
-
 
 if __name__ == "__main__":
     main()
