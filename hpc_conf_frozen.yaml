@@ -1,0 +1,56 @@
+load_model_path: /home/energy/s234633/ELECTRA/trained_models/ELECTRA_2026-07-04_elated-firebrand-293.model_state_dict
+energy_csv: /home/energy/s234633/ELECTRA/data_splits/energies.csv
+data_split: "mpfull2025"
+data_split_path: /home/energy/s234633/ELECTRA/data_splits/
+qm9_dens_path: /home/scratch3/jels/QM9_Full
+
+pbc: False
+hotpp_cutoff: 8
+seed: 0
+wandb: True 
+project_name: electra3
+model_dir: /home/energy/s234633/ELECTRA/trained_models
+
+loss_type: normal
+loss_coef: 10
+huber_loss_threshold: 0.1
+density_coef: 1
+energy_coef: 1
+
+activation_type: silu
+gaus_per_electrons: 90
+master_units: 750
+hotpp_nlayers: 6
+hotpp_outdim: 750
+r_max: 3
+n_max: 3
+out_max: 3
+hotpp_cutoff: 8
+negative_contributions: true
+
+qm9_dens_path: /home/scratch3/jels/QM9_Full
+pred_dens_path_val: pred_dens/validation/
+pred_dens_path_test: pred_dens/test/
+density_delta_path_val: density_deltas/validation
+density_delta_path_test: density_deltas/test
+gaus_pos_path_val: gaussian_positions/validation/
+gaus_pos_path_test: gaussian_positions/test/
+
+density_coef: 
+energy_channel_width: 100
+energy_coef: 0
+plot_gaus_pos: true
+hpc: true
+crystal: false
+
+
+embed_type: atomic
+poly_order: 5
+miaonet: miaomiao
+max_out_heads: [2, 2, 2]
+head_activate_list: ['silu', 'silu', 'silu']
+norm_heads: ['graph', 'graph', 'graph']
+norm_blocks: graph
+conv_mode: node_j
+update_edge: false
+prune: true
